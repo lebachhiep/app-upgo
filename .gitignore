@@ -1,0 +1,72 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Build directories
+dist/
+build/bin/
+build/darwin/
+
+# Dependency directories
+vendor/
+node_modules/
+
+# Frontend build
+frontend/dist/
+frontend/.vite/
+frontend/wailsjs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Config files (local)
+*.local
+
+# Logs
+*.log
+logs/
+
+# Relay Leaf libraries
+*.dll
+*.so
+*.dylib
+librelay_leaf-*
+relay_leaf-*
+
+# User config
+.relay-app/
+
+# Wails
+.wails-build-*
+build/bin/
+
+# NPM
+yarn.lock
+pnpm-lock.yaml
+
+# Environment
+.env
+.env.local
+.env.*.local
+nul

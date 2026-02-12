@@ -1,0 +1,270 @@
+/* upgo.io design tokens — navy dark theme */
+:root {
+  --accent: #22edeb;
+  --accent-secondary: #1ab8b6;
+  --accent-dim: #22edeba6;
+  --accent-glow: rgba(34, 237, 235, 0.22);
+  --accent-light: rgba(34, 237, 235, 0.35);
+  --accent-muted: rgba(34, 237, 235, 0.2);
+  --accent-very-light: rgba(34, 237, 235, 0.12);
+  --accent-extra-light: rgba(34, 237, 235, 0.06);
+  --bg-primary: #142334;
+  --bg-secondary: #1E2D3E;
+  --bg-tertiary: #24374C;
+  --bg-elevated: #2E4560;
+  --bg-input: #111D2D;
+  --text-primary: #e0e0f0;
+  --text-secondary: #C5CBD3;
+  --text-tertiary: #8B97A7;
+  --text-muted: #8B97A7;
+  --success: #60B966;
+  --warning: #FDC11C;
+  --error: #DD523C;
+  --info: #55B3F6;
+  --border: #1E344E;
+  --border-light: #2D4F76;
+  --border-subtle: #1A2F44;
+  --border-extra-subtle: #172A3E;
+  --overlay-light: rgba(30, 52, 78, 0.4);
+  --overlay-medium: rgba(45, 79, 118, 0.4);
+  --card-bg: #1E2D3E;
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 10px 15px rgba(0, 0, 0, 0.2);
+  --glow-accent: 0 0 40px rgba(34, 237, 235, 0.22);
+  --glow-strong: 0 0 60px rgba(34, 237, 235, 0.35);
+  --radius: 0.5rem;
+  --duration-fast: .15s;
+  --duration-normal: .25s;
+  --ease: cubic-bezier(.25,.1,.25,1);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 13px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--accent-extra-light); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent-muted); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+::selection { background: var(--accent-light); }
+
+/* Title bar */
+.titlebar { -webkit-app-region: drag; --wails-draggable: drag; }
+.titlebar-nodrag { -webkit-app-region: no-drag; --wails-draggable: no-drag; }
+.titlebar-btn { -webkit-app-region: no-drag; --wails-draggable: no-drag; }
+.titlebar-btn:hover { background: var(--overlay-medium) !important; }
+.titlebar-close { -webkit-app-region: no-drag; --wails-draggable: no-drag; }
+.titlebar-close:hover { background: var(--error) !important; color: #fff !important; }
+
+/* Transitions */
+.ant-layout-sider { transition: all var(--duration-normal) var(--ease) !important; }
+.ant-layout-content { transition: margin var(--duration-normal) var(--ease) !important; }
+.ant-menu-item { transition: background var(--duration-fast) ease, color var(--duration-fast) ease !important; }
+
+/* Card — glass-card style */
+.ant-card {
+  background: var(--card-bg) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius) !important;
+  box-shadow: none !important;
+  transition: all var(--duration-normal) var(--ease) !important;
+}
+.ant-card .ant-card-head {
+  border-radius: var(--radius) var(--radius) 0 0 !important;
+}
+.ant-card:hover {
+  background: var(--bg-tertiary) !important;
+  border-color: var(--border-light) !important;
+  box-shadow: var(--glow-accent) !important;
+}
+
+/* Icon alignment — global */
+.anticon {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  vertical-align: middle !important;
+}
+
+/* Tag */
+.ant-tag {
+  border-radius: 4px !important;
+}
+
+/* Input */
+.ant-input,
+.ant-input-affix-wrapper {
+  border-radius: var(--radius) !important;
+}
+
+/* Select */
+.ant-select-selector {
+  border-radius: var(--radius) !important;
+}
+
+/* Switch — keep pill shape */
+.ant-switch {
+  border-radius: 100px !important;
+}
+.ant-switch .ant-switch-handle::before {
+  border-radius: 100px !important;
+}
+
+/* Modal */
+.ant-modal-content {
+  border-radius: var(--radius) !important;
+}
+
+/* Menu */
+.ant-menu-item {
+  border-radius: var(--radius) !important;
+}
+
+/* All buttons */
+.ant-btn {
+  border-radius: var(--radius) !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.025em !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  transition: all var(--duration-fast) ease !important;
+}
+.ant-btn .anticon {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-size: 14px !important;
+  line-height: 1 !important;
+}
+.ant-btn-sm {
+  font-size: 13px !important;
+}
+.ant-btn-sm .anticon {
+  font-size: 12px !important;
+}
+
+/* Button glow for primary */
+.ant-btn-primary {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  color: var(--bg-primary) !important;
+}
+.ant-btn-primary:hover:not(:disabled) {
+  background: var(--accent-secondary) !important;
+  border-color: var(--accent-secondary) !important;
+  box-shadow: var(--glow-accent) !important;
+}
+.ant-btn-primary:active:not(:disabled) {
+  background: var(--accent-dim) !important;
+}
+.ant-btn-primary:disabled {
+  background: var(--accent-muted) !important;
+  border-color: transparent !important;
+  color: var(--bg-primary) !important;
+  opacity: 0.5;
+}
+
+/* Default button */
+.ant-btn-default {
+  background: var(--overlay-light) !important;
+  border-color: var(--border) !important;
+  color: var(--text-primary) !important;
+}
+.ant-btn-default:hover:not(:disabled) {
+  border-color: var(--accent-glow) !important;
+  color: var(--accent) !important;
+}
+
+/* Danger button */
+.ant-btn-dangerous {
+  border-color: var(--error) !important;
+}
+.ant-btn-dangerous:hover:not(:disabled) {
+  box-shadow: 0 0 20px rgba(221, 82, 60, 0.15) !important;
+}
+
+/* Input focus glow */
+.ant-input:focus,
+.ant-input-focused,
+.ant-input-affix-wrapper-focused {
+  box-shadow: 0 0 0 2px var(--accent-very-light) !important;
+}
+
+/* Statistic */
+.ant-statistic-title { text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500 !important; font-size: 11px !important; color: var(--text-tertiary) !important; }
+.ant-statistic-content { font-weight: 700 !important; }
+
+/* Descriptions */
+.ant-descriptions-item-label { color: var(--text-tertiary) !important; font-size: 12px !important; }
+.ant-descriptions-item-content { color: var(--text-primary) !important; font-family: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace !important; font-size: 12px !important; }
+
+/* Tag — navy-themed preset colors */
+.ant-tag { border: none !important; }
+.ant-tag-success { background: rgba(96, 185, 102, 0.12) !important; color: var(--success) !important; }
+.ant-tag-error { background: rgba(221, 82, 60, 0.12) !important; color: var(--error) !important; }
+.ant-tag-warning { background: rgba(253, 193, 28, 0.12) !important; color: var(--warning) !important; }
+.ant-tag-gold { background: rgba(253, 193, 28, 0.12) !important; color: var(--warning) !important; }
+.ant-tag-processing { background: rgba(85, 179, 246, 0.12) !important; color: var(--info) !important; }
+.ant-tag-default { background: rgba(139, 151, 167, 0.1) !important; color: var(--text-tertiary) !important; }
+
+/* Switch */
+.ant-switch-checked { background: var(--accent) !important; }
+
+/* Modal */
+.ant-modal-content { border: 1px solid var(--border) !important; }
+
+/* Sidebar overlay */
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  top: var(--titlebar-bottom, 32px); left: 0; right: 0; bottom: 0;
+  background: rgba(20, 35, 52, 0.7);
+  z-index: 90;
+  backdrop-filter: blur(4px);
+}
+
+@media (max-width: 1024px) {
+  .sidebar-overlay.visible { display: block; }
+  .ant-layout-sider {
+    position: fixed !important;
+    top: var(--titlebar-bottom, 32px) !important; left: 0 !important; bottom: 0 !important;
+    z-index: 100 !important;
+    height: calc(100vh - var(--titlebar-bottom, 32px)) !important;
+    box-shadow: 4px 0 20px rgba(0, 0, 0, 0.5) !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .ant-col { min-height: 0 !important; }
+}
+
+/* Glow animation */
+@keyframes glowPulse {
+  0%, 100% { box-shadow: 0 0 25px var(--accent-glow); }
+  50% { box-shadow: 0 0 50px var(--accent-light); }
+}
