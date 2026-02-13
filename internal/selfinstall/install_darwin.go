@@ -74,3 +74,9 @@ func relaunch(targetExe string, args []string) {
 	cmd.Stdin = os.Stdin
 	cmd.Start()
 }
+
+// CreateDesktopShortcut is a no-op on macOS.
+// The .app bundle installed to ~/Applications is accessible via Spotlight and Launchpad.
+func CreateDesktopShortcut() error {
+	return nil
+}

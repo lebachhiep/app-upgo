@@ -16,6 +16,7 @@ import (
 	"relay-app/internal/config"
 	"relay-app/internal/proxy"
 	"relay-app/internal/relay"
+	"relay-app/internal/selfinstall"
 	"relay-app/internal/window"
 )
 
@@ -66,24 +67,29 @@ func (a *App) startup(ctx context.Context) {
 		})
 	}
 
-	// Ensure autostart is registered on first run or if enabled in config
+	// Ensure autostart + desktop shortcut on first run, or update on subsequent runs
 	go func() {
 		cfg := config.Get()
 		if !cfg.GetBool("autostart_initialized") {
 			// First run (fresh install or old config without this flag) —
-			// enable autostart, close-to-tray, auto-start by default
+			// enable autostart and auto-start by default
 			if err := autostart.Enable(); err != nil {
 				log.Warn().Err(err).Msg("Failed to enable autostart on first run")
 			} else {
 				log.Info().Msg("Autostart enabled on first run")
 			}
+			// Create desktop shortcut (Windows .lnk, Linux .desktop, macOS no-op)
+			if err := selfinstall.CreateDesktopShortcut(); err != nil {
+				log.Warn().Err(err).Msg("Failed to create desktop shortcut")
+			} else {
+				log.Info().Msg("Desktop shortcut created")
+			}
 			cfg.Set("launch_on_startup", true)
 			cfg.Set("auto_start", true)
-			cfg.Set("close_to_tray", true)
 			cfg.Set("autostart_initialized", true)
 			config.Save()
 		} else if cfg.GetBool("launch_on_startup") {
-			// Already initialized — just ensure registry points to current exe
+			// Already initialized — just ensure autostart points to current exe
 			if err := autostart.Enable(); err != nil {
 				log.Warn().Err(err).Msg("Failed to ensure autostart registry entry")
 			} else {
