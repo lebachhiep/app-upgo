@@ -404,7 +404,7 @@ function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, 
             const pAvgDown = upSec > 0 ? (ps.bytes_recv ?? 0) / upSec : 0
 
             return (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', padding: '4px 10px', borderBottom: '1px solid #172A3E', fontSize: 9 }}>
+              <div key={ps.url} style={{ display: 'flex', alignItems: 'center', padding: '4px 10px', borderBottom: '1px solid #172A3E', fontSize: 9 }}>
                 <span style={{ width: 18, color: '#8B97A7', fontFamily: 'monospace' }}>{i + 1}</span>
                 <span style={{ width: 46 }}>
                   {isChecking ? (

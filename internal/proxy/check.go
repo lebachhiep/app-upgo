@@ -182,6 +182,12 @@ func checkSOCKS5Proxy(originalUrl string, u *url.URL) Status {
 		elapsed := time.Since(start).Milliseconds()
 		result.Latency = elapsed
 		result.Error = "timeout after 10s"
+		// Clean up the goroutine's connection when it eventually completes
+		go func() {
+			if dr := <-ch; dr.conn != nil {
+				dr.conn.Close()
+			}
+		}()
 		return result
 	case dr := <-ch:
 		elapsed := time.Since(start).Milliseconds()

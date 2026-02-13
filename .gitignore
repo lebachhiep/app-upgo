@@ -1,10 +1,3 @@
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
 # Test binary, built with `go test -c`
 *.test
 
@@ -47,7 +40,9 @@ desktop.ini
 *.log
 logs/
 
-# Relay Leaf libraries (except embedded libs for build)
+# Binaries and native libraries (except embedded libs for build)
+*.exe
+*.exe~
 *.dll
 *.so
 *.dylib
@@ -62,14 +57,21 @@ relay_leaf-*
 
 # Wails
 .wails-build-*
-build/bin/
 
 # NPM
 yarn.lock
 pnpm-lock.yaml
 
-# Environment
+# Environment / Secrets
 .env
 .env.local
 .env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.yaml
+
+# Windows reserved
 nul

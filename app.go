@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -23,8 +24,8 @@ import (
 // proxyMgrEntry wraps a per-proxy RelayManager with its index and latest stats.
 type proxyMgrEntry struct {
 	mgr       *relay.RelayManager
-	proxyIdx  int          // index in proxyStatuses[], -1 if no proxy
-	lastStats *relay.Stats // latest stats from this manager
+	proxyIdx  int                            // index in proxyStatuses[], -1 if no proxy
+	lastStats atomic.Pointer[relay.Stats]    // latest stats from this manager (atomic for concurrent access)
 }
 
 type App struct {
@@ -283,7 +284,7 @@ func (a *App) createProxyMgrEntry(proxyIdx int, proxyURL string, verbose bool, d
 	}
 
 	mgr.OnStatsUpdate = func(stats *relay.Stats) {
-		entry.lastStats = stats
+		entry.lastStats.Store(stats)
 		// Update per-proxy bandwidth directly from this manager's stats
 		if proxyIdx >= 0 {
 			a.proxyStatusMu.Lock()
@@ -345,7 +346,7 @@ func (a *App) createDirectMgrEntry(verbose bool, discoveryUrl, partnerId string)
 	}
 
 	mgr.OnStatsUpdate = func(stats *relay.Stats) {
-		entry.lastStats = stats
+		entry.lastStats.Store(stats)
 		runtime.EventsEmit(a.ctx, "direct:stats", stats)
 		a.emitAggregateStats()
 	}
@@ -497,9 +498,23 @@ func (a *App) GetConfig() map[string]interface{} {
 	}
 }
 
+// allowedConfigKeys restricts which config keys the frontend may modify.
+var allowedConfigKeys = map[string]bool{
+	"partner_id":        true,
+	"discovery_url":     true,
+	"verbose":           true,
+	"auto_start":        true,
+	"launch_on_startup": true,
+	"log_level":         true,
+}
+
 func (a *App) SetConfigValue(key, value string) error {
+	normalized := config.NormalizeKey(key)
+	if !allowedConfigKeys[normalized] {
+		return fmt.Errorf("config key not allowed: %s", key)
+	}
 	cfg := config.Get()
-	cfg.Set(config.NormalizeKey(key), value)
+	cfg.Set(normalized, value)
 	if err := config.Save(); err != nil {
 		return err
 	}
@@ -818,28 +833,29 @@ func (a *App) emitAggregateStats() {
 
 	var agg relay.Stats
 	// Include direct entry
-	if a.directEntry != nil && a.directEntry.lastStats != nil {
-		ds := a.directEntry.lastStats
-		agg.BytesSent += ds.BytesSent
-		agg.BytesRecv += ds.BytesRecv
-		agg.Uptime = ds.Uptime
-		agg.TotalStreams += ds.TotalStreams
-		agg.ActiveStreams += ds.ActiveStreams
-		agg.ConnectedNodes += ds.ConnectedNodes
-		agg.ReconnectCount += ds.ReconnectCount
+	if a.directEntry != nil {
+		if ds := a.directEntry.lastStats.Load(); ds != nil {
+			agg.BytesSent += ds.BytesSent
+			agg.BytesRecv += ds.BytesRecv
+			agg.Uptime = ds.Uptime
+			agg.TotalStreams += ds.TotalStreams
+			agg.ActiveStreams += ds.ActiveStreams
+			agg.ConnectedNodes += ds.ConnectedNodes
+			agg.ReconnectCount += ds.ReconnectCount
+		}
 	}
 	// Include proxy entries
 	for _, entry := range a.proxyMgrs {
-		if entry.lastStats != nil {
-			agg.BytesSent += entry.lastStats.BytesSent
-			agg.BytesRecv += entry.lastStats.BytesRecv
-			if entry.lastStats.Uptime > agg.Uptime {
-				agg.Uptime = entry.lastStats.Uptime
+		if ls := entry.lastStats.Load(); ls != nil {
+			agg.BytesSent += ls.BytesSent
+			agg.BytesRecv += ls.BytesRecv
+			if ls.Uptime > agg.Uptime {
+				agg.Uptime = ls.Uptime
 			}
-			agg.TotalStreams += entry.lastStats.TotalStreams
-			agg.ActiveStreams += entry.lastStats.ActiveStreams
-			agg.ConnectedNodes += entry.lastStats.ConnectedNodes
-			agg.ReconnectCount += entry.lastStats.ReconnectCount
+			agg.TotalStreams += ls.TotalStreams
+			agg.ActiveStreams += ls.ActiveStreams
+			agg.ConnectedNodes += ls.ConnectedNodes
+			agg.ReconnectCount += ls.ReconnectCount
 		}
 	}
 	agg.Timestamp = time.Now().Unix()

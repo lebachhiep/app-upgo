@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -38,17 +39,26 @@ func EnsureInstalled(args []string) bool {
 }
 
 // isSamePath compares two paths in a platform-appropriate way.
+// Case-insensitive on Windows/macOS, case-sensitive on Linux.
 func isSamePath(a, b string) bool {
 	a = filepath.Clean(a)
 	b = filepath.Clean(b)
-	if strings.EqualFold(a, b) {
+
+	equal := func(x, y string) bool {
+		if runtime.GOOS == "linux" {
+			return x == y
+		}
+		return strings.EqualFold(x, y)
+	}
+
+	if equal(a, b) {
 		return true
 	}
 	// Check by resolving symlinks on both sides
 	ra, err1 := filepath.EvalSymlinks(a)
 	rb, err2 := filepath.EvalSymlinks(b)
 	if err1 == nil && err2 == nil {
-		return strings.EqualFold(filepath.Clean(ra), filepath.Clean(rb))
+		return equal(filepath.Clean(ra), filepath.Clean(rb))
 	}
 	return false
 }
@@ -74,9 +84,14 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 
 	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	// Check Close error to detect flush/write failures
+	if err := out.Close(); err != nil {
 		os.Remove(dst)
 		return err
 	}

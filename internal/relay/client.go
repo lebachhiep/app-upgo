@@ -203,22 +203,21 @@ func (rm *RelayManager) pollStats() {
 		case <-rm.stopPoll:
 			return
 		case <-ticker.C:
-			rm.mu.RLock()
+			rm.mu.Lock()
 			if rm.client == nil {
-				rm.mu.RUnlock()
+				rm.mu.Unlock()
 				return
 			}
 
 			connected := rm.client.IsConnected()
-			if connected != rm.lastConnected {
+			statusChanged := connected != rm.lastConnected
+			if statusChanged {
 				rm.lastConnected = connected
-				if rm.OnStatusChange != nil {
-					rm.OnStatusChange(connected)
-				}
 			}
 
+			var stats *Stats
 			if sdkStats, err := rm.client.GetStats(); err == nil && sdkStats != nil {
-				stats := &Stats{
+				stats = &Stats{
 					BytesSent:      sdkStats.BytesSent,
 					BytesRecv:      sdkStats.BytesReceived,
 					Uptime:         sdkStats.UptimeSeconds,
@@ -229,11 +228,16 @@ func (rm *RelayManager) pollStats() {
 					ConnectedNodes: sdkStats.ConnectedNodes,
 					Timestamp:      time.Now().Unix(),
 				}
-				if rm.OnStatsUpdate != nil {
-					rm.OnStatsUpdate(stats)
-				}
 			}
-			rm.mu.RUnlock()
+			rm.mu.Unlock()
+
+			// Emit callbacks outside the lock to avoid holding it during callbacks
+			if statusChanged && rm.OnStatusChange != nil {
+				rm.OnStatusChange(connected)
+			}
+			if stats != nil && rm.OnStatsUpdate != nil {
+				rm.OnStatsUpdate(stats)
+			}
 		}
 	}
 }

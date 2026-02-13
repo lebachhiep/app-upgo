@@ -25,7 +25,6 @@ export interface Config {
   proxies: string[]
   verbose: boolean
   auto_start: boolean
-  close_to_tray: boolean
   launch_on_startup: boolean
   log_level: string
 }

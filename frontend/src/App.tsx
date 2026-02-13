@@ -83,8 +83,8 @@ function App() {
       try {
         const cfg = await AppService.GetConfig()
         if (cfg) {
-          if ((cfg as any).partner_id) setSavedPartnerId((cfg as any).partner_id)
-          const proxies = (cfg as any).proxies as string[] | undefined
+          if (cfg.partner_id) setSavedPartnerId(cfg.partner_id)
+          const proxies = cfg.proxies as string[] | undefined
           if (proxies && proxies.length > 0) {
             setProxyStatuses(proxies.map(url => ({
               url, alive: false, latency: 0, error: '', protocol: '', since: 0, bytes_sent: 0, bytes_recv: 0,

@@ -27,7 +27,7 @@ func Get() *viper.Viper {
 		}
 
 		configDir := filepath.Join(homeDir, ".relay-app")
-		if err := os.MkdirAll(configDir, 0755); err != nil {
+		if err := os.MkdirAll(configDir, 0700); err != nil {
 			configDir = "."
 		}
 

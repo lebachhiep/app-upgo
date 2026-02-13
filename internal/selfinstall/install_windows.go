@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 func installedExePath() string {
@@ -46,6 +47,10 @@ func CreateDesktopShortcut() error {
 	}
 
 	// Use PowerShell WScript.Shell COM to create .lnk
+	// Escape single quotes in paths to prevent PowerShell injection
+	escPath := func(s string) string {
+		return strings.ReplaceAll(s, "'", "''")
+	}
 	ps := fmt.Sprintf(
 		`$ws = New-Object -ComObject WScript.Shell; `+
 			`$s = $ws.CreateShortcut('%s'); `+
@@ -54,7 +59,7 @@ func CreateDesktopShortcut() error {
 			`$s.IconLocation = '%s,0'; `+
 			`$s.Description = 'UPGO Node - BNC Network'; `+
 			`$s.Save()`,
-		shortcutPath, exePath, filepath.Dir(exePath), exePath,
+		escPath(shortcutPath), escPath(exePath), escPath(filepath.Dir(exePath)), escPath(exePath),
 	)
 
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps)
