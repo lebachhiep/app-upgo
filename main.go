@@ -14,6 +14,7 @@ import (
 	"relay-app/frontend"
 	"relay-app/internal/cli"
 	"relay-app/internal/config"
+	"relay-app/internal/selfinstall"
 	"relay-app/internal/singleinstance"
 )
 
@@ -35,6 +36,18 @@ func main() {
 		}
 	}
 	os.Args = filteredArgs
+
+	// Self-install: copy to proper location and relaunch if needed.
+	// Skip during Wails binding generation.
+	if !isBindings {
+		relaunchArgs := os.Args[1:]
+		if silent {
+			relaunchArgs = append(relaunchArgs, "--silent")
+		}
+		if selfinstall.EnsureInstalled(relaunchArgs) {
+			return
+		}
+	}
 
 	// Skip single-instance check during Wails binding generation
 	if !isBindings {

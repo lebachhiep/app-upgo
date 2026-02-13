@@ -44,7 +44,8 @@
 | :rocket: | **Auto-start** | Launch on boot (LaunchAgent / Registry / XDG) |
 | :ghost: | **Silent Mode** | Background operation with `--silent`, show GUI on re-launch |
 | :lock: | **Single Instance** | Mutex lock; second launch shows existing window |
-| :package: | **Auto-update Library** | Downloads native relay library with SHA256 verification |
+| :package: | **Embedded Library** | Native relay library embedded at build time, auto-updates via SHA256 |
+| :file_folder: | **Self-install** | Auto-installs to proper OS location when run from ZIP/temp |
 | :keyboard: | **Built-in Terminal** | xterm.js terminal emulator in the GUI |
 
 ---
@@ -295,6 +296,11 @@ upgo-node/
 |   |   |-- errors.go                 # ErrAlreadyRunning error
 |   |   |-- singleinstance_unix.go    # flock + PID + SIGUSR1
 |   |   +-- singleinstance_windows.go # Windows Mutex
+|   |-- selfinstall/
+|   |   |-- selfinstall.go        # Self-install logic (copy & relaunch)
+|   |   |-- install_windows.go    # Windows: %LOCALAPPDATA%\UPGONode\
+|   |   |-- install_darwin.go     # macOS: ~/Applications/ (.app) or ~/.local/share/
+|   |   +-- install_linux.go      # Linux: ~/.local/share/UPGONode/
 |   +-- window/
 |       |-- constrain_windows.go  # Win32 window subclassing
 |       +-- constrain_other.go    # No-op stub (macOS/Linux)
@@ -377,6 +383,28 @@ The relay native library is **embedded into the binary at build time** using `go
 5. If a newer version exists on the server, it is downloaded and replaces the local copy
 
 **Dev builds** (`wails dev`) work without pre-downloading — the app falls back to runtime download. If download also fails, the app runs in **stub mode** with simulated data.
+
+---
+
+## Self-Install
+
+When the app detects it is **not** running from its designated install location, it automatically copies itself there and relaunches. This ensures the app works correctly even when run directly from a ZIP archive (e.g., Windows Explorer opens EXE from ZIP in a temp directory).
+
+| Platform | Install Location |
+|----------|-----------------|
+| **Windows** | `%LOCALAPPDATA%\UPGONode\upgo-node.exe` |
+| **macOS** (`.app` bundle) | `~/Applications/upgo-node.app` |
+| **macOS** (standalone) | `~/.local/share/UPGONode/upgo-node` |
+| **Linux** | `~/.local/share/UPGONode/upgo-node` |
+
+**How it works:**
+
+1. On startup, the app checks if `os.Executable()` matches the install path
+2. If not, copies itself (or the entire `.app` bundle on macOS) to the install location
+3. Relaunches from the install location with the same arguments
+4. The original process exits
+
+This also ensures that **autostart paths** (Registry / LaunchAgent / XDG) always point to a stable, persistent location.
 
 ---
 
