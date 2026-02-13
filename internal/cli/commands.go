@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"relay-app/internal/autostart"
 	"relay-app/internal/config"
 	"relay-app/internal/proxy"
 	"relay-app/internal/relay"
@@ -74,41 +76,120 @@ func newStartCmd() *cobra.Command {
 				cfg.Set("verbose", true)
 			}
 
-			manager := relay.NewRelayManager()
-			manager.OnLog = func(msg string) {
-				fmt.Fprintln(cmd.OutOrStdout(), msg)
-			}
-			manager.OnStatsUpdate = func(stats *relay.Stats) {
-				fmt.Fprintf(cmd.OutOrStdout(), "\r[Stats] Sent: %d bytes | Recv: %d bytes | Connections: %d | Uptime: %ds",
-					stats.BytesSent, stats.BytesRecv, stats.Connections, stats.Uptime)
+			isVerbose := cfg.GetBool("verbose")
+
+			// Resolve discovery URL
+			discUrl := discoveryUrl
+			if discUrl == "" {
+				discUrl = cfg.GetString("discovery_url")
 			}
 
-			if err := manager.Init(cfg.GetBool("verbose")); err != nil {
-				return err
-			}
-
-			if discoveryUrl != "" {
-				if err := manager.SetDiscoveryURL(discoveryUrl); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to set discovery URL: %v\n", err)
-				}
-			} else if cfgUrl := cfg.GetString("discovery_url"); cfgUrl != "" {
-				if err := manager.SetDiscoveryURL(cfgUrl); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to set discovery URL: %v\n", err)
-				}
-			}
-
+			// Collect all proxies (config + CLI flags)
 			allProxies := append(cfg.GetStringSlice("proxies"), proxyUrls...)
-			for _, p := range allProxies {
-				if err := manager.AddProxy(p); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to add proxy %s: %v\n", p, err)
+
+			// ── Health-check proxies in parallel (like GUI) ──
+			var allStatuses []proxy.Status
+			if len(allProxies) > 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "Checking proxies...")
+				allStatuses = make([]proxy.Status, len(allProxies))
+				var wg sync.WaitGroup
+				for i, p := range allProxies {
+					wg.Add(1)
+					go func(idx int, proxyUrl string) {
+						defer wg.Done()
+						allStatuses[idx] = proxy.CheckHealth(proxyUrl)
+					}(i, p)
+				}
+				wg.Wait()
+
+				for _, ps := range allStatuses {
+					status := "FAIL"
+					if ps.Alive {
+						status = "OK"
+					}
+					detail := ""
+					if ps.Error != "" {
+						detail = fmt.Sprintf(" (%s)", ps.Error)
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "  [%s] %s  proto=%s  latency=%dms%s\n",
+						status, ps.URL, ps.Protocol, ps.Latency, detail)
 				}
 			}
 
-			if err := manager.Start(partnerId); err != nil {
-				return err
+			// ── Create direct (no-proxy) SDK instance — always running (like GUI) ──
+			var managers []*relay.RelayManager
+
+			directMgr := relay.NewRelayManager()
+			directMgr.OnLog = func(msg string) {
+				if isVerbose {
+					fmt.Fprintln(cmd.OutOrStdout(), msg)
+				}
+			}
+			directMgr.OnStatsUpdate = func(stats *relay.Stats) {
+				// Stats aggregation is handled below
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Node started with partner ID: %s\n", partnerId)
+			if err := directMgr.Init(isVerbose); err != nil {
+				return fmt.Errorf("failed to init direct node: %w", err)
+			}
+
+			if discUrl != "" {
+				if err := directMgr.SetDiscoveryURL(discUrl); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to set discovery URL: %v\n", err)
+				}
+			}
+
+			if err := directMgr.Start(partnerId); err != nil {
+				directMgr.Close()
+				return fmt.Errorf("failed to start direct node: %w", err)
+			}
+			managers = append(managers, directMgr)
+			fmt.Fprintln(cmd.OutOrStdout(), "Direct (no-proxy) node started")
+
+			// ── Create one SDK instance per alive proxy (like GUI) ──
+			proxyStarted := 0
+			for _, ps := range allStatuses {
+				if !ps.Alive {
+					continue
+				}
+				proxyURL := proxy.BuildProxyURL(ps.URL, ps.Protocol)
+
+				mgr := relay.NewRelayManager()
+				mgr.OnLog = func(msg string) {
+					if isVerbose {
+						fmt.Fprintln(cmd.OutOrStdout(), msg)
+					}
+				}
+
+				if err := mgr.Init(isVerbose); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to init proxy manager for %s: %v\n", ps.URL, err)
+					continue
+				}
+
+				if discUrl != "" {
+					if err := mgr.SetDiscoveryURL(discUrl); err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to set discovery URL for proxy %s: %v\n", ps.URL, err)
+					}
+				}
+
+				if err := mgr.AddProxy(proxyURL); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to add proxy %s: %v\n", proxyURL, err)
+					mgr.Close()
+					continue
+				}
+
+				if err := mgr.Start(partnerId); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to start proxy node %s: %v\n", ps.URL, err)
+					mgr.Close()
+					continue
+				}
+
+				managers = append(managers, mgr)
+				proxyStarted++
+				fmt.Fprintf(cmd.OutOrStdout(), "Proxy node started: %s (%s)\n", ps.URL, ps.Protocol)
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "\nNode started with partner ID: %s (direct + %d proxies)\n", partnerId, proxyStarted)
 
 			if daemon || !isTerminal() {
 				fmt.Fprintln(cmd.OutOrStdout(), "Running in daemon mode...")
@@ -119,7 +200,9 @@ func newStartCmd() *cobra.Command {
 			<-sigCh
 
 			fmt.Fprintln(cmd.OutOrStdout(), "\nStopping node...")
-			manager.Close()
+			for _, mgr := range managers {
+				mgr.Close()
+			}
 			return nil
 		},
 	}
@@ -271,6 +354,24 @@ func newConfigCmd() *cobra.Command {
 				return fmt.Errorf("failed to save config: %w", err)
 			}
 
+			// Handle launch_on_startup: register/unregister system autostart (like GUI)
+			if key == "launch_on_startup" {
+				enabled := strings.EqualFold(value, "true") || value == "1"
+				if enabled {
+					if err := autostart.Enable(); err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to enable autostart: %v\n", err)
+					} else {
+						fmt.Fprintln(cmd.OutOrStdout(), "System autostart enabled")
+					}
+				} else {
+					if err := autostart.Disable(); err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to disable autostart: %v\n", err)
+					} else {
+						fmt.Fprintln(cmd.OutOrStdout(), "System autostart disabled")
+					}
+				}
+			}
+
 			fmt.Fprintf(cmd.OutOrStdout(), "Config set: %s = %s\n", key, value)
 			return nil
 		},
@@ -286,9 +387,10 @@ func newConfigCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "partner_id:    %s\n", cfg.GetString("partner_id"))
 			fmt.Fprintf(cmd.OutOrStdout(), "discovery_url: %s\n", cfg.GetString("discovery_url"))
 			fmt.Fprintf(cmd.OutOrStdout(), "proxies:       %s\n", strings.Join(cfg.GetStringSlice("proxies"), ", "))
-			fmt.Fprintf(cmd.OutOrStdout(), "verbose:       %v\n", cfg.GetBool("verbose"))
-			fmt.Fprintf(cmd.OutOrStdout(), "auto_start:    %v\n", cfg.GetBool("auto_start"))
-			fmt.Fprintf(cmd.OutOrStdout(), "log_level:     %s\n", cfg.GetString("log_level"))
+			fmt.Fprintf(cmd.OutOrStdout(), "verbose:            %v\n", cfg.GetBool("verbose"))
+			fmt.Fprintf(cmd.OutOrStdout(), "auto_start:         %v\n", cfg.GetBool("auto_start"))
+			fmt.Fprintf(cmd.OutOrStdout(), "launch_on_startup:  %v\n", cfg.GetBool("launch_on_startup"))
+			fmt.Fprintf(cmd.OutOrStdout(), "log_level:          %s\n", cfg.GetString("log_level"))
 			fmt.Fprintf(cmd.OutOrStdout(), "config_file:   %s\n", cfg.ConfigFileUsed())
 			return nil
 		},
@@ -319,7 +421,7 @@ func newVersionCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "UPGO Node v%s\n", appVersion)
 			fmt.Fprintf(cmd.OutOrStdout(), "Library:  %s\n", relayleaf.Version())
 			fmt.Fprintf(cmd.OutOrStdout(), "Platform: %s/%s\n", platform.OS, platform.Arch)
-			fmt.Fprintf(cmd.OutOrStdout(), "Library:  %s\n", platform.LibraryName)
+			fmt.Fprintf(cmd.OutOrStdout(), "Lib file: %s\n", platform.LibraryName)
 			return nil
 		},
 	}
@@ -349,32 +451,47 @@ func newProxyCmd() *cobra.Command {
 
 	addCmd := &cobra.Command{
 		Use:   "add <url>",
-		Short: "Add a proxy",
+		Short: "Add a proxy (auto-detects protocol)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			normalized := proxy.NormalizeURL(args[0])
 			cfg := config.Get()
 			proxies := cfg.GetStringSlice("proxies")
 
 			for _, p := range proxies {
-				if p == args[0] {
-					return fmt.Errorf("proxy already exists: %s", args[0])
+				if p == normalized {
+					return fmt.Errorf("proxy already exists: %s", normalized)
 				}
 			}
 
-			proxies = append(proxies, args[0])
+			// Auto-check health and detect protocol (like GUI)
+			fmt.Fprintf(cmd.OutOrStdout(), "Checking %s ...\n", normalized)
+			result := proxy.CheckHealth(normalized)
+
+			if result.Alive {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Status:   OK\n")
+				fmt.Fprintf(cmd.OutOrStdout(), "  Protocol: %s\n", result.Protocol)
+				fmt.Fprintf(cmd.OutOrStdout(), "  Latency:  %dms\n", result.Latency)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Status:   FAIL (%s)\n", result.Error)
+				fmt.Fprintln(cmd.OutOrStdout(), "  Warning:  proxy saved but may not work at runtime")
+			}
+
+			proxies = append(proxies, normalized)
 			cfg.Set("proxies", proxies)
 			if err := config.Save(); err != nil {
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Proxy added: %s\n", args[0])
+			fmt.Fprintf(cmd.OutOrStdout(), "Proxy added: %s\n", normalized)
 			return nil
 		},
 	}
 
+	var listCheck bool
 	listCmd := &cobra.Command{
 		Use:   "list",
-		Short: "List proxies",
+		Short: "List proxies (use --check to test health)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := config.Get()
 			proxies := cfg.GetStringSlice("proxies")
@@ -386,11 +503,22 @@ func newProxyCmd() *cobra.Command {
 
 			fmt.Fprintln(cmd.OutOrStdout(), "Configured Proxies:")
 			for i, p := range proxies {
-				fmt.Fprintf(cmd.OutOrStdout(), "  %d. %s\n", i+1, p)
+				if listCheck {
+					result := proxy.CheckHealth(p)
+					status := "FAIL"
+					if result.Alive {
+						status = "OK"
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "  %d. %s  [%s] proto=%s latency=%dms\n",
+						i+1, p, status, result.Protocol, result.Latency)
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %d. %s\n", i+1, p)
+				}
 			}
 			return nil
 		},
 	}
+	listCmd.Flags().BoolVar(&listCheck, "check", false, "Check health of each proxy")
 
 	removeCmd := &cobra.Command{
 		Use:   "remove <url>",

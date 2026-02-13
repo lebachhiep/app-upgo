@@ -38,7 +38,6 @@ func Get() *viper.Viper {
 		instance.SetDefault("proxies", []string{})
 		instance.SetDefault("verbose", false)
 		instance.SetDefault("auto_start", true)
-		instance.SetDefault("close_to_tray", true)
 		instance.SetDefault("launch_on_startup", true)
 		instance.SetDefault("log_level", "info")
 

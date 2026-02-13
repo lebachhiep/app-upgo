@@ -53,6 +53,14 @@ var (
 	cbPtr       uintptr // prevent GC of callback
 )
 
+// unsafePtr converts a uintptr (e.g. Win32 lParam) to unsafe.Pointer.
+// This is valid for Win32 callbacks where lParam holds a kernel-provided pointer.
+//
+//go:nosplit
+func unsafePtr(p uintptr) unsafe.Pointer {
+	return *(*unsafe.Pointer)(unsafe.Pointer(&p))
+}
+
 func constrainProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	switch msg {
 	case wmGetMinMaxInfo:
@@ -67,7 +75,7 @@ func constrainProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			mi.Size = uint32(unsafe.Sizeof(mi))
 			ok, _, _ := procGetMonitorInfoW.Call(hMon, uintptr(unsafe.Pointer(&mi)))
 			if ok != 0 {
-				mmi := (*winMINMAXINFO)(unsafe.Pointer(lParam))
+				mmi := (*winMINMAXINFO)(unsafePtr(lParam))
 				mmi.MaxPosition.X = mi.Work.Left - mi.Monitor.Left
 				mmi.MaxPosition.Y = mi.Work.Top - mi.Monitor.Top
 				mmi.MaxSize.X = mi.Work.Right - mi.Work.Left
@@ -78,7 +86,7 @@ func constrainProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 
 	case wmMoving:
 		if lParam != 0 {
-			r := (*winRECT)(unsafe.Pointer(lParam))
+			r := (*winRECT)(unsafePtr(lParam))
 
 			hMon, _, _ := procMonitorFromRect.Call(lParam, monitorDefaultToNearest)
 			if hMon != 0 {

@@ -153,12 +153,3 @@ func generateDeviceID(partnerID string) string {
 	hash := sha256.Sum256([]byte(seed))
 	return fmt.Sprintf("rl-%x", hash[:8])
 }
-
-func randomHex(n int) string {
-	const hexChars = "0123456789abcdef"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = hexChars[rand.Intn(len(hexChars))]
-	}
-	return string(b)
-}

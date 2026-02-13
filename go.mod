@@ -3,7 +3,6 @@ module relay-app
 go 1.24
 
 require (
-	github.com/energye/systray v1.0.3
 	github.com/rs/zerolog v1.31.0
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/viper v1.18.2

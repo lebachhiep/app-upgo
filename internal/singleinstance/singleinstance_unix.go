@@ -3,8 +3,11 @@
 package singleinstance
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -29,6 +32,12 @@ func Acquire() (*Lock, error) {
 		return nil, ErrAlreadyRunning
 	}
 
+	// Write PID so second instance can signal us
+	f.Truncate(0)
+	f.Seek(0, 0)
+	fmt.Fprintf(f, "%d", os.Getpid())
+	f.Sync()
+
 	return &Lock{file: f}, nil
 }
 
@@ -39,4 +48,21 @@ func (l *Lock) Release() {
 		os.Remove(lockPath())
 		l.file = nil
 	}
+}
+
+// SignalExisting sends SIGUSR1 to the running instance to show its window.
+func SignalExisting() error {
+	data, err := os.ReadFile(lockPath())
+	if err != nil {
+		return fmt.Errorf("cannot read lock file: %w", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return fmt.Errorf("invalid PID in lock file: %w", err)
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Signal(syscall.SIGUSR1)
 }

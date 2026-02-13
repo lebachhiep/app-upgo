@@ -45,9 +45,14 @@ func Enable() error {
 func Disable() error {
 	k, err := registry.OpenKey(registry.CURRENT_USER, regKey, registry.SET_VALUE)
 	if err != nil {
-		return err
+		// Key doesn't exist — already disabled
+		return nil
 	}
 	defer k.Close()
 
-	return k.DeleteValue(appName)
+	err = k.DeleteValue(appName)
+	if err == registry.ErrNotExist {
+		return nil // value doesn't exist — already disabled
+	}
+	return err
 }

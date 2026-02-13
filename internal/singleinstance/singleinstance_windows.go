@@ -40,3 +40,8 @@ func (l *Lock) Release() {
 		l.handle = 0
 	}
 }
+
+// SignalExisting is a no-op on Windows (mutex doesn't store PID).
+func SignalExisting() error {
+	return nil
+}

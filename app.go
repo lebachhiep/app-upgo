@@ -16,7 +16,6 @@ import (
 	"relay-app/internal/config"
 	"relay-app/internal/proxy"
 	"relay-app/internal/relay"
-	"relay-app/internal/tray"
 	"relay-app/internal/window"
 )
 
@@ -38,8 +37,6 @@ type App struct {
 	logs          []string
 	logMu         sync.RWMutex
 	silentMode    bool
-	trayCtrl      *tray.TrayController
-	forceQuit     bool
 	proxyStatuses []proxy.Status
 	proxyStatusMu sync.RWMutex
 }
@@ -52,6 +49,10 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+
+	// Listen for SIGUSR1 from second instance to show window
+	listenShowSignal(a)
+
 	// Control manager — used only for EnsureLibrary, never Started
 	a.manager = relay.NewRelayManager()
 	a.manager.OnLog = func(msg string) {
@@ -65,35 +66,7 @@ func (a *App) startup(ctx context.Context) {
 		})
 	}
 
-	// Initialize system tray
-	a.trayCtrl = tray.NewTrayController(tray.TrayCallbacks{
-		OnShowWindow: func() {
-			runtime.WindowShow(a.ctx)
-			runtime.WindowUnminimise(a.ctx)
-			go func() {
-				time.Sleep(100 * time.Millisecond)
-				a.centerAndResize50()
-			}()
-		},
-		OnStartRelay: func() {
-			cfg := config.Get()
-			partnerId := cfg.GetString("partner_id")
-			go a.StartRelay(partnerId)
-		},
-		OnStopRelay: func() {
-			go a.StopRelay()
-		},
-		OnQuit: func() {
-			a.forceQuit = true
-			runtime.Quit(a.ctx)
-		},
-		IsRelayRunning: func() bool {
-			return a.isRelayRunning()
-		},
-	})
-	a.trayCtrl.Start()
-
-	// Ensure Windows autostart registry entry immediately (before library download)
+	// Ensure autostart registry entry immediately (before library download)
 	go func() {
 		cfg := config.Get()
 		if cfg.GetBool("launch_on_startup") {
@@ -154,32 +127,10 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) beforeClose(ctx context.Context) (prevent bool) {
-	if a.forceQuit {
-		return false
-	}
-
-	cfg := config.Get()
-	if cfg.GetBool("close_to_tray") {
-		runtime.WindowHide(a.ctx)
-		// Auto-start relay when closing to tray if not already running
-		if !a.isRelayRunning() {
-			go func() {
-				partnerId := cfg.GetString("partner_id")
-				if err := a.StartRelay(partnerId); err != nil {
-					log.Error().Err(err).Msg("Auto-start on close failed")
-				}
-			}()
-		}
-		return true
-	}
-
-	return false
+	return false // always allow close (systray removed)
 }
 
 func (a *App) shutdown(ctx context.Context) {
-	if a.trayCtrl != nil {
-		a.trayCtrl.Stop()
-	}
 	a.stopAllProxyMgrs()
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -275,7 +226,7 @@ func (a *App) StartRelay(partnerId string) error {
 
 	log.Info().Int("proxies_started", startedCount).Int("proxies_total", len(proxies)).Msg("Node instances started (+ direct)")
 
-	// Auto-enable launch_on_startup + auto_start + close_to_tray on first Partner ID
+	// Auto-enable launch_on_startup + auto_start on first Partner ID
 	oldPartnerId := cfg.GetString("partner_id")
 	firstPartner := oldPartnerId == "" && partnerId != ""
 
@@ -283,7 +234,6 @@ func (a *App) StartRelay(partnerId string) error {
 	if firstPartner {
 		cfg.Set("auto_start", true)
 		cfg.Set("launch_on_startup", true)
-		cfg.Set("close_to_tray", true)
 		go func() {
 			if err := autostart.Enable(); err != nil {
 				log.Warn().Err(err).Msg("Failed to auto-enable startup")
@@ -297,9 +247,6 @@ func (a *App) StartRelay(partnerId string) error {
 	runtime.EventsEmit(a.ctx, "relay:started", true)
 	if firstPartner {
 		runtime.EventsEmit(a.ctx, "config:updated", a.GetConfig())
-	}
-	if a.trayCtrl != nil {
-		a.trayCtrl.SetRelayRunning(true)
 	}
 	return nil
 }
@@ -414,9 +361,6 @@ func (a *App) StopRelay() error {
 	a.stopAllProxyMgrs()
 
 	runtime.EventsEmit(a.ctx, "relay:stopped", true)
-	if a.trayCtrl != nil {
-		a.trayCtrl.SetRelayRunning(false)
-	}
 	return nil
 }
 
@@ -528,7 +472,6 @@ func (a *App) GetConfig() map[string]interface{} {
 		"proxies":           cfg.GetStringSlice("proxies"),
 		"verbose":           cfg.GetBool("verbose"),
 		"auto_start":        cfg.GetBool("auto_start"),
-		"close_to_tray":     cfg.GetBool("close_to_tray"),
 		"launch_on_startup": cfg.GetBool("launch_on_startup"),
 		"log_level":         cfg.GetString("log_level"),
 	}
@@ -736,7 +679,7 @@ func (a *App) GetVersion() map[string]interface{} {
 	}
 }
 
-// ── Tray & Auto-start methods ───────────────────────────
+// ── Auto-start methods ──────────────────────────────────
 
 func (a *App) SetLaunchOnStartup(enabled bool) error {
 	cfg := config.Get()
@@ -772,28 +715,12 @@ func (a *App) IsWindowMaximised() bool {
 	return runtime.WindowIsMaximised(a.ctx)
 }
 
-// CloseWindow handles the X button: hide to tray or fully quit
+// CloseWindow handles the X button: fully quit
 func (a *App) CloseWindow() {
-	cfg := config.Get()
-	if cfg.GetBool("close_to_tray") {
-		runtime.WindowHide(a.ctx)
-		// Auto-start relay when closing to tray if not already running
-		if !a.isRelayRunning() {
-			go func() {
-				partnerId := cfg.GetString("partner_id")
-				if err := a.StartRelay(partnerId); err != nil {
-					log.Error().Err(err).Msg("Auto-start on close failed")
-				}
-			}()
-		}
-	} else {
-		a.forceQuit = true
-		runtime.Quit(a.ctx)
-	}
+	runtime.Quit(a.ctx)
 }
 
 func (a *App) QuitApp() {
-	a.forceQuit = true
 	runtime.Quit(a.ctx)
 }
 
