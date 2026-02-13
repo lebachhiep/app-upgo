@@ -29,18 +29,26 @@ type Status struct {
 // If no scheme is given, auto-detect by trying SOCKS5 → HTTP → HTTPS.
 func CheckHealth(proxyUrl string) Status {
 	raw := strings.TrimSpace(proxyUrl)
+
+	// Convert legacy 4-part format host:port:user:pass → user:pass@host:port
+	if !strings.Contains(raw, "://") && !strings.Contains(raw, "@") {
+		parts := strings.Split(raw, ":")
+		if len(parts) == 4 {
+			raw = fmt.Sprintf("%s:%s@%s:%s", parts[2], parts[3], parts[0], parts[1])
+		}
+	}
+
 	hasScheme := strings.Contains(raw, "://")
 
 	if hasScheme {
-		normalized := strings.TrimSpace(proxyUrl)
-		u, err := url.Parse(normalized)
+		u, err := url.Parse(raw)
 		if err != nil {
 			return Status{URL: proxyUrl, Error: fmt.Sprintf("invalid URL: %v", err)}
 		}
 		scheme := strings.ToLower(u.Scheme)
 		switch scheme {
 		case "http", "https":
-			return checkHTTPProxy(proxyUrl, normalized, scheme)
+			return checkHTTPProxy(proxyUrl, raw, scheme)
 		default:
 			return checkSOCKS5Proxy(proxyUrl, u)
 		}

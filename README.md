@@ -111,15 +111,18 @@ Run with a subcommand for CLI mode, or without arguments to launch GUI.
 ### Node Control
 
 ```bash
-upgo-node start --partner-id YOUR_ID          # Start the node
-upgo-node start --partner-id YOUR_ID --daemon  # Daemon mode
-upgo-node start --partner-id YOUR_ID --verbose # Verbose logging
-upgo-node stop                                 # Stop the node
-upgo-node status                               # Show status
-upgo-node stats --watch                        # Live stats
-upgo-node stats --json                         # JSON output
-upgo-node version                              # Version info
-upgo-node device-id                            # Show device ID
+upgo-node start --partner-id YOUR_ID                        # Start the node
+upgo-node start --partner-id YOUR_ID --daemon               # Daemon mode
+upgo-node start --partner-id YOUR_ID --verbose              # Verbose logging
+upgo-node start --partner-id YOUR_ID --proxy socks5://x:y   # With extra proxy
+upgo-node start --discovery-url https://custom.url          # Custom discovery
+upgo-node stop                                               # Stop the node
+upgo-node status                                             # Show status
+upgo-node status --stats                                     # Status with live stats
+upgo-node stats --watch                                      # Live stats
+upgo-node stats --json                                       # JSON output
+upgo-node version                                            # Version info
+upgo-node device-id                                          # Show device ID
 ```
 
 ### Configuration
@@ -138,6 +141,7 @@ upgo-node config get partner_id                         # Get a value
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `partner_id` | string | `""` | Partner ID for BNC connection |
+| `discovery_url` | string | `""` | Custom discovery server URL |
 | `proxies` | string[] | `[]` | List of proxy URLs |
 | `verbose` | bool | `false` | Verbose logging |
 | `auto_start` | bool | `true` | Auto-start relay when app opens |

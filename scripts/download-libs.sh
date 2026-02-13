@@ -16,7 +16,6 @@ DEST_DIR="$(cd "$(dirname "$0")/.." && pwd)/pkg/relayleaf/libs"
 
 SERVERS=(
   "https://release.prx.network"
-  "https://github.com/lebachhiep/relay-leaf-library/releases/latest/download"
 )
 
 platform_to_lib() {

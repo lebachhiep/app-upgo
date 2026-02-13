@@ -16,7 +16,6 @@ import (
 
 var downloadServers = []string{
 	"https://release.prx.network",
-	"https://github.com/lebachhiep/relay-leaf-library/releases/latest/download",
 }
 
 type checksumFile struct {
@@ -229,16 +228,16 @@ func downloadFile(url, dest string) bool {
 		return false
 	}
 
-	f, err := os.Create(dest)
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
 		return false
 	}
-	defer f.Close()
 
 	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
 		os.Remove(dest)
 		return false
 	}
 
-	return true
+	return f.Close() == nil
 }
