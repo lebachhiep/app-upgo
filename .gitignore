@@ -47,12 +47,15 @@ desktop.ini
 *.log
 logs/
 
-# Relay Leaf libraries
+# Relay Leaf libraries (except embedded libs for build)
 *.dll
 *.so
 *.dylib
 librelay_leaf-*
 relay_leaf-*
+!pkg/relayleaf/libs/*.dll
+!pkg/relayleaf/libs/*.so
+!pkg/relayleaf/libs/*.dylib
 
 # User config
 .relay-app/

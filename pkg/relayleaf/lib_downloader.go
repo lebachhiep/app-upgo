@@ -16,6 +16,7 @@ import (
 
 var downloadServers = []string{
 	"https://release.prx.network",
+	"https://github.com/lebachhiep/sdk-relay-leaf/releases/latest/download",
 }
 
 type checksumFile struct {
