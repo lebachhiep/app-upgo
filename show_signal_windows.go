@@ -2,6 +2,10 @@
 
 package main
 
+import "relay-app/internal/singleinstance"
+
 func listenShowSignal(app *App) {
-	// Windows: no SIGUSR1 support, single-instance handled via mutex only
+	singleinstance.ListenForShowSignal(func() {
+		app.ShowWindow()
+	})
 }

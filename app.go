@@ -38,7 +38,7 @@ type App struct {
 	mu            sync.RWMutex
 	logs          []string
 	logMu         sync.RWMutex
-	silentMode    bool
+	silentMode bool
 	proxyStatuses []proxy.Status
 	proxyStatusMu sync.RWMutex
 }
@@ -68,34 +68,32 @@ func (a *App) startup(ctx context.Context) {
 		})
 	}
 
-	// Ensure autostart + desktop shortcut on first run, or update on subsequent runs
+	// Ensure autostart + desktop shortcut on every startup
 	go func() {
 		cfg := config.Get()
 		if !cfg.GetBool("autostart_initialized") {
-			// First run (fresh install or old config without this flag) —
-			// enable autostart and auto-start by default
+			// First run — enable autostart by default
 			if err := autostart.Enable(); err != nil {
 				log.Warn().Err(err).Msg("Failed to enable autostart on first run")
 			} else {
 				log.Info().Msg("Autostart enabled on first run")
-			}
-			// Create desktop shortcut (Windows .lnk, Linux .desktop, macOS no-op)
-			if err := selfinstall.CreateDesktopShortcut(); err != nil {
-				log.Warn().Err(err).Msg("Failed to create desktop shortcut")
-			} else {
-				log.Info().Msg("Desktop shortcut created")
 			}
 			cfg.Set("launch_on_startup", true)
 			cfg.Set("auto_start", true)
 			cfg.Set("autostart_initialized", true)
 			config.Save()
 		} else if cfg.GetBool("launch_on_startup") {
-			// Already initialized — just ensure autostart points to current exe
+			// Ensure autostart points to current exe
 			if err := autostart.Enable(); err != nil {
 				log.Warn().Err(err).Msg("Failed to ensure autostart registry entry")
 			} else {
 				log.Info().Msg("Autostart registry entry ensured")
 			}
+		}
+
+		// Always ensure desktop shortcut exists (recreate if user deleted it)
+		if err := selfinstall.CreateDesktopShortcut(); err != nil {
+			log.Warn().Err(err).Msg("Failed to ensure desktop shortcut")
 		}
 	}()
 
@@ -108,17 +106,9 @@ func (a *App) startup(ctx context.Context) {
 		cfg := config.Get()
 		partnerId := cfg.GetString("partner_id")
 
-		// Auto-start relay:
-		// - If partner_id exists → always start
-		// - If no partner_id → only start in silent mode (launched from Windows startup)
-		if partnerId != "" {
-			if err := a.StartRelay(partnerId); err != nil {
-				log.Error().Err(err).Msg("Auto-start failed")
-			}
-		} else if a.silentMode {
-			if err := a.StartRelay(""); err != nil {
-				log.Error().Err(err).Msg("Silent mode auto-start failed")
-			}
+		// Always auto-start relay on startup
+		if err := a.StartRelay(partnerId); err != nil {
+			log.Error().Err(err).Msg("Auto-start relay failed")
 		}
 	}()
 
@@ -148,7 +138,18 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) beforeClose(ctx context.Context) (prevent bool) {
-	return false // always allow close (systray removed)
+	// If relay not running, start it before hiding
+	if !a.isRelayRunning() {
+		cfg := config.Get()
+		go func() {
+			if err := a.StartRelay(cfg.GetString("partner_id")); err != nil {
+				log.Error().Err(err).Msg("Auto-start relay on close failed")
+			}
+		}()
+	}
+	// Always hide instead of quitting — app must run in background permanently
+	runtime.WindowHide(a.ctx)
+	return true // prevent close
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -750,13 +751,22 @@ func (a *App) IsWindowMaximised() bool {
 	return runtime.WindowIsMaximised(a.ctx)
 }
 
-// CloseWindow handles the X button: fully quit
+// CloseWindow handles the X button: hide to background, relay keeps running
 func (a *App) CloseWindow() {
-	runtime.Quit(a.ctx)
+	runtime.WindowHide(a.ctx)
 }
 
+// ShowWindow shows the hidden window (called from second instance signal)
+func (a *App) ShowWindow() {
+	runtime.WindowShow(a.ctx)
+	runtime.WindowUnminimise(a.ctx)
+	runtime.WindowSetAlwaysOnTop(a.ctx, true)
+	runtime.WindowSetAlwaysOnTop(a.ctx, false)
+}
+
+// QuitApp hides the window — app never exits, always runs in background
 func (a *App) QuitApp() {
-	runtime.Quit(a.ctx)
+	runtime.WindowHide(a.ctx)
 }
 
 // centerAndResize50 sets window to 50% of screen, centered. Cross-platform via Wails runtime.
