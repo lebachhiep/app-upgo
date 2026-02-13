@@ -95,6 +95,13 @@ func EnsureLibrary(libraryPath string) bool {
 		libraryPath = filepath.Join(filepath.Dir(exePath), libName)
 	}
 
+	// Try extracting embedded library if file doesn't exist on disk yet
+	if _, err := os.Stat(libraryPath); os.IsNotExist(err) {
+		if ExtractEmbeddedLibrary(libName, libraryPath) {
+			logMsg("Extracted embedded library")
+		}
+	}
+
 	logMsg("Fetching remote checksum...")
 	expectedHash := fetchExpectedHash(libName)
 
@@ -114,6 +121,11 @@ func EnsureLibrary(libraryPath string) bool {
 			return true
 		}
 	} else {
+		// File doesn't exist — try embedded extraction one more time
+		if ExtractEmbeddedLibrary(libName, libraryPath) {
+			logMsg("Extracted embedded library")
+			return true
+		}
 		logMsg("Library not found, downloading...")
 	}
 

@@ -27,20 +27,25 @@ jobs:
           - os: windows-latest
             platform: windows/amd64
             artifact-name: upgo-node-windows-amd64
+            libs: "windows-x64"
           - os: windows-latest
             platform: windows/386
             artifact-name: upgo-node-windows-x86
+            libs: "windows-x86"
           # ── macOS (universal = Intel + Apple Silicon) ────
           - os: macos-latest
             platform: darwin/universal
             artifact-name: upgo-node-macos-universal
+            libs: "darwin-arm64 darwin-amd64"
           # ── Linux ────────────────────────────────────────
           - os: ubuntu-22.04
             platform: linux/amd64
             artifact-name: upgo-node-linux-amd64
+            libs: "linux-x64"
           - os: ubuntu-22.04
             platform: linux/arm64
             artifact-name: upgo-node-linux-arm64
+            libs: "linux-arm64"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +84,9 @@ jobs:
 
       - name: Install frontend deps
         run: cd frontend && npm ci
+
+      - name: Download native libraries for embedding
+        run: bash scripts/download-libs.sh ${{ matrix.libs }}
 
       - name: Build
         run: |

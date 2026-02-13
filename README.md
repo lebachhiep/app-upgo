@@ -154,10 +154,15 @@ UPGO Node supports **SOCKS5**, **HTTP**, and **HTTPS** proxies. Protocol is auto
 ### Add a proxy (auto-checks health & protocol)
 
 ```bash
-upgo-node proxy add 10.0.0.1:1080                       # Auto-detect protocol
-upgo-node proxy add socks5://10.0.0.1:1080               # SOCKS5 explicit
-upgo-node proxy add http://user:pass@proxy.com:8080      # HTTP with auth
-upgo-node proxy add https://proxy.com:443                # HTTPS
+upgo-node proxy add 10.0.0.1:1080                           # Auto-detect protocol
+upgo-node proxy add socks5://10.0.0.1:1080                   # SOCKS5 explicit
+upgo-node proxy add http://proxy.com:8080                    # HTTP
+upgo-node proxy add https://proxy.com:443                    # HTTPS
+upgo-node proxy add socks5://user:pass@10.0.0.1:1080         # SOCKS5 with auth
+upgo-node proxy add http://user:pass@proxy.com:8080          # HTTP with auth
+upgo-node proxy add https://user:pass@secure.proxy.com:443   # HTTPS with auth
+upgo-node proxy add user:pass@10.0.0.1:1080                  # Auth without scheme (auto-detect)
+upgo-node proxy add 10.0.0.1:1080:myuser:mypass              # Legacy 4-part format
 ```
 
 Output:
@@ -187,6 +192,29 @@ upgo-node proxy remove 10.0.0.1:1080  # Remove a proxy
 | **HTTP** | `http://host:8080` | 8080 |
 | **HTTPS** | `https://host:443` | 443 |
 | **Auto** | `host:port` | tries SOCKS5 -> HTTP -> HTTPS |
+
+### Authentication
+
+All proxy protocols support `username:password` authentication. Credentials are embedded in the proxy URL:
+
+```
+scheme://username:password@host:port
+```
+
+**Supported auth formats:**
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| **Standard URL** | `socks5://user:pass@host:1080` | Recommended format |
+| **HTTP auth** | `http://user:pass@host:8080` | HTTP proxy with auth |
+| **HTTPS auth** | `https://user:pass@host:443` | HTTPS proxy with auth |
+| **No scheme** | `user:pass@host:1080` | Auto-detect protocol |
+| **Legacy 4-part** | `host:port:user:pass` | Converted to `scheme://user:pass@host:port` |
+
+**Notes:**
+- Credentials with special characters should be URL-encoded (e.g., `p%40ss` for `p@ss`)
+- Auth is passed via SOCKS5 handshake (for SOCKS5) or `Proxy-Authorization` header (for HTTP/HTTPS)
+- Proxies without auth work as well — simply omit the `user:pass@` part
 
 ### How proxy works at runtime
 
@@ -272,8 +300,11 @@ upgo-node/
 |       +-- constrain_other.go    # No-op stub (macOS/Linux)
 |
 |-- pkg/relayleaf/
+|   |-- embed.go                  # Embed native libs (go:embed all:libs)
 |   |-- lib_downloader.go         # Auto-download library + SHA256 verify
-|   +-- relay_leaf_stub.go        # Stub client for dev/testing
+|   |-- lib_embedded.go           # Extract embedded library to disk
+|   |-- relay_leaf_stub.go        # Stub client for dev/testing
+|   +-- libs/                     # Native libraries (downloaded before build)
 |
 |-- frontend/                     # React + TypeScript + Vite + Ant Design
 |   |-- embed.go                  # Embed compiled assets into binary
@@ -288,6 +319,7 @@ upgo-node/
 |       |-- services/wails.ts     # Wails API bindings
 |       +-- theme.ts              # Dark theme
 |
+|-- scripts/download-libs.sh      # Download native libs for embedding
 |-- Makefile                      # Build automation
 |-- Dockerfile.linux              # Multi-stage Docker build
 +-- .github/workflows/build.yml  # CI/CD pipeline
@@ -325,7 +357,7 @@ upgo-node/
 
 ## Native Library
 
-The relay library is auto-downloaded on first launch with SHA256 verification:
+The relay native library is **embedded into the binary at build time** using `go:embed`. On first launch, it is extracted to disk next to the executable. The app also checks for updates via SHA256 verification against remote servers.
 
 | Platform | Library |
 |----------|---------|
@@ -336,7 +368,15 @@ The relay library is auto-downloaded on first launch with SHA256 verification:
 | Linux x64 | `librelay_leaf-linux-x64.so` |
 | Linux arm64 | `librelay_leaf-linux-arm64.so` |
 
-If download fails, the app runs in **stub mode** with simulated data.
+**How it works:**
+
+1. CI/CD runs `scripts/download-libs.sh <platform>` before building to place libraries in `pkg/relayleaf/libs/`
+2. `go:embed all:libs` embeds them into the binary
+3. On first launch, the embedded library is extracted to disk
+4. Remote checksum is fetched to verify the library is up to date
+5. If a newer version exists on the server, it is downloaded and replaces the local copy
+
+**Dev builds** (`wails dev`) work without pre-downloading — the app falls back to runtime download. If download also fails, the app runs in **stub mode** with simulated data.
 
 ---
 
@@ -364,7 +404,9 @@ If download fails, the app runs in **stub mode** with simulated data.
 partner_id: "YOUR_PARTNER_ID"
 proxies:
   - socks5://10.0.0.1:1080
+  - socks5://user:pass@10.0.0.2:1080
   - http://proxy.example.com:8080
+  - http://user:pass@proxy.example.com:8080
   - https://secure-proxy.example.com:443
 verbose: false
 auto_start: true
