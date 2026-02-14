@@ -53,15 +53,13 @@ func main() {
 	if !isBindings {
 		lock, err := singleinstance.Acquire()
 		if err != nil {
-			// GUI mode (no args): signal existing instance to show window
-			if len(os.Args) <= 1 {
-				if sigErr := singleinstance.SignalExisting(); sigErr != nil {
-					fmt.Fprintln(os.Stderr, "Failed to signal existing instance:", sigErr)
-				}
-				os.Exit(0)
+			// Already running — kill old instance so new one takes over
+			singleinstance.KillExisting()
+			lock, err = singleinstance.Acquire()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
 			}
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
 		}
 		defer lock.Release()
 	}

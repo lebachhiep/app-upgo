@@ -3,25 +3,27 @@
 package singleinstance
 
 import (
+	"os"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
 var (
-	kernel32        = syscall.NewLazyDLL("kernel32.dll")
-	createMutexW    = kernel32.NewProc("CreateMutexW")
-	createEventW    = kernel32.NewProc("CreateEventW")
-	openEventW      = kernel32.NewProc("OpenEventW")
-	setEvent        = kernel32.NewProc("SetEvent")
-	waitForSingleOb = kernel32.NewProc("WaitForSingleObject")
-	closeHandle     = kernel32.NewProc("CloseHandle")
+	kernel32         = syscall.NewLazyDLL("kernel32.dll")
+	createMutexW     = kernel32.NewProc("CreateMutexW")
+	closeHandle      = kernel32.NewProc("CloseHandle")
+	openProcess      = kernel32.NewProc("OpenProcess")
+	terminateProcess = kernel32.NewProc("TerminateProcess")
+
+	user32                   = syscall.NewLazyDLL("user32.dll")
+	findWindowW              = user32.NewProc("FindWindowW")
+	getWindowThreadProcessId = user32.NewProc("GetWindowThreadProcessId")
 )
 
 const (
 	errorAlreadyExists = 183
-	eventModifyState   = 0x0002
-	infinite           = 0xFFFFFFFF
-	waitObject0        = 0
+	processTerminate   = 0x0001
 )
 
 type Lock struct {
@@ -50,33 +52,23 @@ func (l *Lock) Release() {
 	}
 }
 
-// ListenForShowSignal creates a named event and calls callback whenever
-// a second instance signals it. This runs in a background goroutine.
-func ListenForShowSignal(callback func()) {
-	evName, _ := syscall.UTF16PtrFromString("Local\\UPGONode_ShowWindow")
-	h, _, _ := createEventW.Call(0, 0, 0, uintptr(unsafe.Pointer(evName))) // auto-reset event
-	if h == 0 {
+// KillExisting finds the running UPGO Node window, gets its process ID,
+// and terminates that process so the new instance can take over.
+func KillExisting() {
+	titlePtr, _ := syscall.UTF16PtrFromString("UPGO Node")
+	hwnd, _, _ := findWindowW.Call(0, uintptr(unsafe.Pointer(titlePtr)))
+	if hwnd == 0 {
 		return
 	}
-	go func() {
-		for {
-			ret, _, _ := waitForSingleOb.Call(h, infinite)
-			if ret != waitObject0 {
-				return // event handle closed or error
-			}
-			callback()
-		}
-	}()
-}
-
-// SignalExisting sets the named event so the running instance shows its window.
-func SignalExisting() error {
-	evName, _ := syscall.UTF16PtrFromString("Local\\UPGONode_ShowWindow")
-	h, _, _ := openEventW.Call(eventModifyState, 0, uintptr(unsafe.Pointer(evName)))
-	if h == 0 {
-		return nil // event not found (app may not have created it yet)
+	var pid uint32
+	getWindowThreadProcessId.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
+	if pid == 0 || pid == uint32(os.Getpid()) {
+		return
 	}
-	setEvent.Call(h)
-	closeHandle.Call(h)
-	return nil
+	handle, _, _ := openProcess.Call(processTerminate, 0, uintptr(pid))
+	if handle != 0 {
+		terminateProcess.Call(handle, 0)
+		closeHandle.Call(handle)
+	}
+	time.Sleep(500 * time.Millisecond)
 }

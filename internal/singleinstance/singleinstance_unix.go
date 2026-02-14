@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type Lock struct {
@@ -32,7 +33,7 @@ func Acquire() (*Lock, error) {
 		return nil, ErrAlreadyRunning
 	}
 
-	// Write PID so second instance can signal us
+	// Write PID so second instance can kill us
 	f.Truncate(0)
 	f.Seek(0, 0)
 	fmt.Fprintf(f, "%d", os.Getpid())
@@ -50,19 +51,20 @@ func (l *Lock) Release() {
 	}
 }
 
-// SignalExisting sends SIGUSR1 to the running instance to show its window.
-func SignalExisting() error {
+// KillExisting reads PID from lock file and kills the running instance.
+func KillExisting() {
 	data, err := os.ReadFile(lockPath())
 	if err != nil {
-		return fmt.Errorf("cannot read lock file: %w", err)
+		return
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return fmt.Errorf("invalid PID in lock file: %w", err)
+	if err != nil || pid == os.Getpid() {
+		return
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return err
+		return
 	}
-	return proc.Signal(syscall.SIGUSR1)
+	proc.Kill()
+	time.Sleep(500 * time.Millisecond)
 }

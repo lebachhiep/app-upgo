@@ -9,17 +9,20 @@ import (
 )
 
 var (
-	user32                 = syscall.NewLazyDLL("user32.dll")
-	procFindWindowW        = user32.NewProc("FindWindowW")
-	procSetWindowLongPtrW  = user32.NewProc("SetWindowLongPtrW")
-	procCallWindowProcW    = user32.NewProc("CallWindowProcW")
-	procMonitorFromWindow  = user32.NewProc("MonitorFromWindow")
-	procMonitorFromRect    = user32.NewProc("MonitorFromRect")
-	procGetMonitorInfoW    = user32.NewProc("GetMonitorInfoW")
+	user32                = syscall.NewLazyDLL("user32.dll")
+	procFindWindowW       = user32.NewProc("FindWindowW")
+	procSetWindowLongPtrW = user32.NewProc("SetWindowLongPtrW")
+	procCallWindowProcW   = user32.NewProc("CallWindowProcW")
+	procMonitorFromWindow = user32.NewProc("MonitorFromWindow")
+	procMonitorFromRect   = user32.NewProc("MonitorFromRect")
+	procGetMonitorInfoW   = user32.NewProc("GetMonitorInfoW")
 )
 
 const (
 	gwlpWndProc             = ^uintptr(3) // -4 as uintptr
+	wmClose                 = 0x0010
+	wmSysCommand            = 0x0112
+	scClose                 = 0xF060
 	wmMoving                = 0x0216
 	wmGetMinMaxInfo         = 0x0024
 	monitorDefaultToNearest = 0x00000002
@@ -63,6 +66,18 @@ func unsafePtr(p uintptr) unsafe.Pointer {
 
 func constrainProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	switch msg {
+	case wmClose:
+		// Never close — hide window instead. App must always run in background.
+		procShowWindow.Call(hwnd, swHide)
+		return 0
+
+	case wmSysCommand:
+		// Block Alt+F4 and system menu Close
+		if wParam&0xFFF0 == scClose {
+			procShowWindow.Call(hwnd, swHide)
+			return 0
+		}
+
 	case wmGetMinMaxInfo:
 		// Let original proc handle first
 		ret, _, _ := procCallWindowProcW.Call(origWndProc, hwnd, msg, wParam, lParam)
@@ -128,9 +143,8 @@ func constrainProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 }
 
 var (
-	procMoveWindow            = user32.NewProc("MoveWindow")
-	procShowWindow            = user32.NewProc("ShowWindow")
-	procSystemParametersInfoW = user32.NewProc("SystemParametersInfoW")
+	procMoveWindow = user32.NewProc("MoveWindow")
+	procShowWindow = user32.NewProc("ShowWindow")
 )
 
 const swHide = 0
@@ -151,8 +165,6 @@ func HideWindow(windowTitle string) error {
 	procShowWindow.Call(hwnd, swHide)
 	return nil
 }
-
-const spiGetWorkArea = 0x0030
 
 // CenterAndResize positions the window at the center of the work area,
 // sized to ~80% of the available space (clamped between min and max bounds).

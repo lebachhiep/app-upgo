@@ -24,8 +24,8 @@ import (
 // proxyMgrEntry wraps a per-proxy RelayManager with its index and latest stats.
 type proxyMgrEntry struct {
 	mgr       *relay.RelayManager
-	proxyIdx  int                            // index in proxyStatuses[], -1 if no proxy
-	lastStats atomic.Pointer[relay.Stats]    // latest stats from this manager (atomic for concurrent access)
+	proxyIdx  int                         // index in proxyStatuses[], -1 if no proxy
+	lastStats atomic.Pointer[relay.Stats] // latest stats from this manager (atomic for concurrent access)
 }
 
 type App struct {
@@ -38,7 +38,7 @@ type App struct {
 	mu            sync.RWMutex
 	logs          []string
 	logMu         sync.RWMutex
-	silentMode bool
+	silentMode    bool
 	proxyStatuses []proxy.Status
 	proxyStatusMu sync.RWMutex
 }
@@ -51,9 +51,6 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-
-	// Listen for SIGUSR1 from second instance to show window
-	listenShowSignal(a)
 
 	// Control manager — used only for EnsureLibrary, never Started
 	a.manager = relay.NewRelayManager()
@@ -147,9 +144,12 @@ func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 			}
 		}()
 	}
-	// Always hide instead of quitting — app must run in background permanently
-	runtime.WindowHide(a.ctx)
-	return true // prevent close
+	// Hide async to avoid deadlock with Wails message pump
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		runtime.WindowHide(a.ctx)
+	}()
+	return true // prevent close — app must run in background permanently
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -466,8 +466,8 @@ func (a *App) GetStatus() (*RelayStatusResponse, error) {
 		BytesSent:      totalSent,
 		BytesRecv:      totalRecv,
 		Uptime:         maxUptime,
-		TotalStreams:    totalStreams,
-		ActiveStreams:   activeStreams,
+		TotalStreams:   totalStreams,
+		ActiveStreams:  activeStreams,
 		ConnectedNodes: connectedNodes,
 		ReconnectCount: reconnectCount,
 		Timestamp:      time.Now().Unix(),
@@ -753,6 +753,17 @@ func (a *App) IsWindowMaximised() bool {
 
 // CloseWindow handles the X button: hide to background, relay keeps running
 func (a *App) CloseWindow() {
+	// If relay not running, start it before hiding
+	if !a.isRelayRunning() {
+		cfg := config.Get()
+		go func() {
+			if err := a.StartRelay(cfg.GetString("partner_id")); err != nil {
+				log.Error().Err(err).Msg("Auto-start relay on close failed")
+			}
+		}()
+	}
+	// Win32 direct hide (Windows), then Wails runtime fallback (macOS/Linux)
+	window.HideWindow("UPGO Node")
 	runtime.WindowHide(a.ctx)
 }
 
@@ -766,6 +777,7 @@ func (a *App) ShowWindow() {
 
 // QuitApp hides the window — app never exits, always runs in background
 func (a *App) QuitApp() {
+	window.HideWindow("UPGO Node")
 	runtime.WindowHide(a.ctx)
 }
 
@@ -895,4 +907,3 @@ func (a *App) emitAggregateConnected() {
 	}
 	runtime.EventsEmit(a.ctx, "status:change", anyConnected)
 }
-
