@@ -10,7 +10,8 @@ import (
 
 // EnsureInstalled checks if the app is running from the proper install
 // location. If not, copies itself there and relaunches with the same
-// arguments. Returns true if the caller should exit (relaunch happened).
+// arguments. Returns true if the caller should exit.
+// IMPORTANT: app must NEVER run from a non-installed location (e.g. temp).
 func EnsureInstalled(args []string) bool {
 	currentExe, err := os.Executable()
 	if err != nil {
@@ -26,16 +27,22 @@ func EnsureInstalled(args []string) bool {
 		return false
 	}
 
+	// Already running from proper install location
 	if isSamePath(currentExe, targetExe) {
 		return false
 	}
 
-	if err := copySelf(currentExe, targetExe); err != nil {
-		return false
+	// Not in proper location — try to copy/update, then ALWAYS exit
+	copySelf(currentExe, targetExe) // ignore error: target may be locked by running instance
+
+	// Try to launch from install location (if file exists there)
+	// If another instance is already running, the new process will
+	// hit single-instance check → signal existing → exit on its own.
+	if _, err := os.Stat(targetExe); err == nil {
+		relaunch(targetExe, args)
 	}
 
-	relaunch(targetExe, args)
-	return true
+	return true // NEVER continue running from wrong location
 }
 
 // isSamePath compares two paths in a platform-appropriate way.
