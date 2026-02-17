@@ -70,6 +70,25 @@ func isSamePath(a, b string) bool {
 	return false
 }
 
+// copyCompanionLibs copies relay leaf native libraries from the source exe
+// directory to the target exe directory. This ensures the DLL/so/dylib is
+// available next to the installed exe.
+func copyCompanionLibs(srcDir, dstDir string) {
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, "relay_leaf") || strings.HasPrefix(name, "librelay_leaf") {
+			_ = copyFile(filepath.Join(srcDir, name), filepath.Join(dstDir, name))
+		}
+	}
+}
+
 // copyFile copies a single file from src to dst, preserving permissions.
 func copyFile(src, dst string) error {
 	srcInfo, err := os.Stat(src)

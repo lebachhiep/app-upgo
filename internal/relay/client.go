@@ -18,6 +18,8 @@ type Stats struct {
 	ActiveStreams  int32  `json:"active_streams"`
 	ConnectedNodes int32  `json:"connected_nodes"`
 	Timestamp      int64  `json:"timestamp"`
+	ExitPointsJSON    string `json:"exit_points_json,omitempty"`
+	NodeAddressesJSON string `json:"node_addresses_json,omitempty"`
 }
 
 type Status struct {
@@ -31,13 +33,34 @@ type RelayManager struct {
 	client          *relayleaf.Client
 	running         bool
 	partnerId       string
+	verbose         bool
+	discoveryUrl    string
+	proxies         []string // stored proxy URLs for fast restart
 	mu              sync.RWMutex
 	stopPoll        chan struct{}
 	OnStatsUpdate   func(*Stats)
 	OnStatusChange  func(bool)
 	OnLog           func(string)
 	OnLibraryStatus func(status, detail string)
+	OnNeedRestart   func() // called when disconnected too long (SDK backoff stuck)
 	lastConnected   bool
+	cachedDeviceId  string
+	disconnectSince time.Time // when connection was lost (zero = connected)
+	lastRestart     time.Time // when last Restart() happened (grace period)
+}
+
+// LastConnected returns the cached connection status (no DLL call).
+func (rm *RelayManager) LastConnected() bool {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return rm.lastConnected
+}
+
+// CachedDeviceId returns the cached device ID (no DLL call).
+func (rm *RelayManager) CachedDeviceId() string {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return rm.cachedDeviceId
 }
 
 func NewRelayManager() *RelayManager {
@@ -66,28 +89,34 @@ func (rm *RelayManager) Init(verbose bool) error {
 	}
 
 	rm.client = client
+	rm.verbose = verbose
 	rm.log("BNC node initialized")
 	return nil
 }
 
 func (rm *RelayManager) SetDiscoveryURL(url string) error {
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
 
 	if rm.client == nil {
 		return fmt.Errorf("client not initialized")
 	}
+	rm.discoveryUrl = url
 	return rm.client.SetDiscoveryURL(url)
 }
 
 func (rm *RelayManager) AddProxy(proxyURL string) error {
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
 
 	if rm.client == nil {
 		return fmt.Errorf("client not initialized")
 	}
-	return rm.client.AddProxy(proxyURL)
+	if err := rm.client.AddProxy(proxyURL); err != nil {
+		return err
+	}
+	rm.proxies = append(rm.proxies, proxyURL)
+	return nil
 }
 
 func (rm *RelayManager) Start(partnerId string) error {
@@ -112,6 +141,7 @@ func (rm *RelayManager) Start(partnerId string) error {
 
 	rm.running = true
 	rm.partnerId = partnerId
+	rm.cachedDeviceId = rm.client.GetDeviceID()
 	rm.stopPoll = make(chan struct{})
 	rm.log(fmt.Sprintf("Node started with partner ID: %s", partnerId))
 
@@ -141,6 +171,69 @@ func (rm *RelayManager) Stop() error {
 	return nil
 }
 
+// Restart recreates the SDK client to reset exponential backoff.
+// This is a fast path — reuses stored proxies, no health checks.
+func (rm *RelayManager) Restart() error {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	if !rm.running {
+		return fmt.Errorf("node not running")
+	}
+
+	partnerId := rm.partnerId
+	verbose := rm.verbose
+	discoveryUrl := rm.discoveryUrl
+	proxies := make([]string, len(rm.proxies))
+	copy(proxies, rm.proxies)
+
+	// Stop polling and old client
+	close(rm.stopPoll)
+	if rm.client != nil {
+		_ = rm.client.Stop()
+		rm.client.Close()
+		rm.client = nil
+	}
+	rm.running = false
+
+	// Create fresh client
+	client, err := relayleaf.NewClient(verbose)
+	if err != nil {
+		return fmt.Errorf("restart: failed to create client: %w", err)
+	}
+
+	if discoveryUrl != "" {
+		_ = client.SetDiscoveryURL(discoveryUrl)
+	}
+
+	for _, p := range proxies {
+		_ = client.AddProxy(p)
+	}
+
+	if err := client.SetPartnerID(partnerId); err != nil {
+		client.Close()
+		return fmt.Errorf("restart: failed to set partner ID: %w", err)
+	}
+
+	if err := client.Start(); err != nil {
+		client.Close()
+		return fmt.Errorf("restart: failed to start: %w", err)
+	}
+
+	rm.client = client
+	rm.running = true
+	rm.cachedDeviceId = client.GetDeviceID()
+	rm.stopPoll = make(chan struct{})
+	rm.lastConnected = false
+	rm.disconnectSince = time.Time{}
+	rm.lastRestart = time.Now()
+
+	rm.log(fmt.Sprintf("Fast restart completed (partner=%s, proxies=%d)", partnerId, len(proxies)))
+
+	go rm.pollStats()
+	return nil
+}
+
 func (rm *RelayManager) Close() {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
@@ -164,20 +257,22 @@ func (rm *RelayManager) IsRunning() bool {
 
 func (rm *RelayManager) GetStatus() *Status {
 	rm.mu.RLock()
-	defer rm.mu.RUnlock()
+	client := rm.client
+	rm.mu.RUnlock()
 
 	status := &Status{
 		Version: relayleaf.Version(),
 	}
 
-	if rm.client == nil {
+	if client == nil {
 		return status
 	}
 
-	status.DeviceId = rm.client.GetDeviceID()
-	status.Connected = rm.client.IsConnected()
+	status.DeviceId = client.GetDeviceID()
 
-	if sdkStats, err := rm.client.GetStats(); err == nil && sdkStats != nil {
+	// Single GetStats call — derive Connected from it (avoids double DLL call)
+	if sdkStats, err := client.GetStats(); err == nil && sdkStats != nil {
+		status.Connected = sdkStats.Connected
 		status.Stats = &Stats{
 			BytesSent:      sdkStats.BytesSent,
 			BytesRecv:      sdkStats.BytesReceived,
@@ -187,7 +282,9 @@ func (rm *RelayManager) GetStatus() *Status {
 			ReconnectCount: sdkStats.ReconnectCount,
 			ActiveStreams:  sdkStats.ActiveStreams,
 			ConnectedNodes: sdkStats.ConnectedNodes,
-			Timestamp:      time.Now().Unix(),
+			Timestamp:         time.Now().Unix(),
+			ExitPointsJSON:    sdkStats.ExitPointsJSON,
+			NodeAddressesJSON: sdkStats.NodeAddressesJSON,
 		}
 	}
 
@@ -203,40 +300,80 @@ func (rm *RelayManager) pollStats() {
 		case <-rm.stopPoll:
 			return
 		case <-ticker.C:
-			rm.mu.Lock()
-			if rm.client == nil {
-				rm.mu.Unlock()
+			// Grab client ref under lock, then release before DLL calls
+			rm.mu.RLock()
+			client := rm.client
+			rm.mu.RUnlock()
+
+			if client == nil {
 				return
 			}
 
-			connected := rm.client.IsConnected()
+			// Single DLL call — derive connected from stats (avoids double GetStats)
+			sdkStats, err := client.GetStats()
+			if err != nil || sdkStats == nil {
+				continue
+			}
+
+			connected := sdkStats.Connected
+			stats := &Stats{
+				BytesSent:      sdkStats.BytesSent,
+				BytesRecv:      sdkStats.BytesReceived,
+				Uptime:         sdkStats.UptimeSeconds,
+				Connections:    sdkStats.ConnectedNodes,
+				TotalStreams:   sdkStats.TotalStreams,
+				ReconnectCount: sdkStats.ReconnectCount,
+				ActiveStreams:  sdkStats.ActiveStreams,
+				ConnectedNodes: sdkStats.ConnectedNodes,
+				Timestamp:         time.Now().Unix(),
+				ExitPointsJSON:    sdkStats.ExitPointsJSON,
+				NodeAddressesJSON: sdkStats.NodeAddressesJSON,
+			}
+
+			// Check status change under minimal lock
+			rm.mu.Lock()
 			statusChanged := connected != rm.lastConnected
 			if statusChanged {
 				rm.lastConnected = connected
 			}
-
-			var stats *Stats
-			if sdkStats, err := rm.client.GetStats(); err == nil && sdkStats != nil {
-				stats = &Stats{
-					BytesSent:      sdkStats.BytesSent,
-					BytesRecv:      sdkStats.BytesReceived,
-					Uptime:         sdkStats.UptimeSeconds,
-					Connections:    sdkStats.ConnectedNodes,
-					TotalStreams:   sdkStats.TotalStreams,
-					ReconnectCount: sdkStats.ReconnectCount,
-					ActiveStreams:  sdkStats.ActiveStreams,
-					ConnectedNodes: sdkStats.ConnectedNodes,
-					Timestamp:      time.Now().Unix(),
+			// Track disconnect duration for watchdog
+			needRestart := false
+			if connected {
+				rm.disconnectSince = time.Time{} // reset
+			} else {
+				// Skip watchdog for 30s after a restart (exit point detection takes time)
+				gracePeriod := !rm.lastRestart.IsZero() && time.Since(rm.lastRestart) < 30*time.Second
+				if gracePeriod {
+					// Don't track disconnect during grace period
+				} else if rm.disconnectSince.IsZero() {
+					rm.disconnectSince = time.Now()
+				} else if time.Since(rm.disconnectSince) > 5*time.Second {
+					needRestart = true
+					rm.disconnectSince = time.Time{} // reset to avoid repeated restarts
 				}
 			}
 			rm.mu.Unlock()
 
-			// Emit callbacks outside the lock to avoid holding it during callbacks
+			// Emit callbacks outside the lock
 			if statusChanged && rm.OnStatusChange != nil {
 				rm.OnStatusChange(connected)
 			}
-			if stats != nil && rm.OnStatsUpdate != nil {
+			if rm.OnStatsUpdate != nil {
 				rm.OnStatsUpdate(stats)
+			}
+
+			// Watchdog: if disconnected too long, trigger restart to reset SDK backoff
+			if needRestart {
+				rm.log("Disconnected for >5s, restarting to reset SDK backoff")
+				go func() {
+					if err := rm.Restart(); err != nil {
+						rm.log(fmt.Sprintf("Watchdog restart failed: %v", err))
+						if rm.OnNeedRestart != nil {
+							rm.OnNeedRestart()
+						}
+					}
+				}()
+				return // stop polling — Restart() will start new poll goroutine
 			}
 		}
 	}

@@ -116,80 +116,69 @@ func newStartCmd() *cobra.Command {
 				}
 			}
 
-			// ── Create direct (no-proxy) SDK instance — always running (like GUI) ──
-			var managers []*relay.RelayManager
-
-			directMgr := relay.NewRelayManager()
-			directMgr.OnLog = func(msg string) {
+			// ── Create SINGLE SDK client with all proxies ──
+			mgr := relay.NewRelayManager()
+			mgr.OnLog = func(msg string) {
 				if isVerbose {
 					fmt.Fprintln(cmd.OutOrStdout(), msg)
 				}
 			}
-			directMgr.OnStatsUpdate = func(stats *relay.Stats) {
-				// Stats aggregation is handled below
+			mgr.OnStatusChange = func(connected bool) {
+				ts := time.Now().Format("15:04:05")
+				if connected {
+					fmt.Fprintf(cmd.OutOrStdout(), "[%s] STATUS: CONNECTED\n", ts)
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "[%s] STATUS: DISCONNECTED\n", ts)
+				}
+			}
+			mgr.OnStatsUpdate = func(stats *relay.Stats) {
+				ts := time.Now().Format("15:04:05")
+				connStr := "NO"
+				if stats.ConnectedNodes > 0 {
+					connStr = "YES"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "[%s] up=%ds conn=%s nodes=%d streams=%d/%d sent=%d recv=%d reconn=%d exits=%d\n",
+					ts, stats.Uptime, connStr, stats.ConnectedNodes, stats.ActiveStreams, stats.TotalStreams,
+					stats.BytesSent, stats.BytesRecv, stats.ReconnectCount, countExitPoints(stats.ExitPointsJSON))
 			}
 
-			if err := directMgr.Init(isVerbose); err != nil {
-				return fmt.Errorf("failed to init direct node: %w", err)
+			mgr.OnNeedRestart = func() {
+				// Fallback if Restart() fails inside the manager
+				ts := time.Now().Format("15:04:05")
+				fmt.Fprintf(cmd.OutOrStdout(), "[%s] WATCHDOG: Restart() failed, attempting full restart...\n", ts)
+			}
+
+			if err := mgr.Init(isVerbose); err != nil {
+				return fmt.Errorf("failed to init node: %w", err)
 			}
 
 			if discUrl != "" {
-				if err := directMgr.SetDiscoveryURL(discUrl); err != nil {
+				if err := mgr.SetDiscoveryURL(discUrl); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to set discovery URL: %v\n", err)
 				}
 			}
 
-			if err := directMgr.Start(partnerId); err != nil {
-				directMgr.Close()
-				return fmt.Errorf("failed to start direct node: %w", err)
-			}
-			managers = append(managers, directMgr)
-			fmt.Fprintln(cmd.OutOrStdout(), "Direct (no-proxy) node started")
-
-			// ── Create one SDK instance per alive proxy (like GUI) ──
-			proxyStarted := 0
+			// Add all alive proxies to the single client
+			addedCount := 0
 			for _, ps := range allStatuses {
 				if !ps.Alive {
 					continue
 				}
 				proxyURL := proxy.BuildProxyURL(ps.URL, ps.Protocol)
-
-				mgr := relay.NewRelayManager()
-				mgr.OnLog = func(msg string) {
-					if isVerbose {
-						fmt.Fprintln(cmd.OutOrStdout(), msg)
-					}
-				}
-
-				if err := mgr.Init(isVerbose); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to init proxy manager for %s: %v\n", ps.URL, err)
-					continue
-				}
-
-				if discUrl != "" {
-					if err := mgr.SetDiscoveryURL(discUrl); err != nil {
-						fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to set discovery URL for proxy %s: %v\n", ps.URL, err)
-					}
-				}
-
 				if err := mgr.AddProxy(proxyURL); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to add proxy %s: %v\n", proxyURL, err)
-					mgr.Close()
-					continue
+				} else {
+					addedCount++
+					fmt.Fprintf(cmd.OutOrStdout(), "Added proxy: %s (%s)\n", ps.URL, ps.Protocol)
 				}
-
-				if err := mgr.Start(partnerId); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to start proxy node %s: %v\n", ps.URL, err)
-					mgr.Close()
-					continue
-				}
-
-				managers = append(managers, mgr)
-				proxyStarted++
-				fmt.Fprintf(cmd.OutOrStdout(), "Proxy node started: %s (%s)\n", ps.URL, ps.Protocol)
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "\nNode started with partner ID: %s (direct + %d proxies)\n", partnerId, proxyStarted)
+			if err := mgr.Start(partnerId); err != nil {
+				mgr.Close()
+				return fmt.Errorf("failed to start node: %w", err)
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "\nNode started with partner ID: %s (direct + %d proxies, single client)\n", partnerId, addedCount)
 
 			if daemon || !isTerminal() {
 				fmt.Fprintln(cmd.OutOrStdout(), "Running in daemon mode...")
@@ -200,9 +189,7 @@ func newStartCmd() *cobra.Command {
 			<-sigCh
 
 			fmt.Fprintln(cmd.OutOrStdout(), "\nStopping node...")
-			for _, mgr := range managers {
-				mgr.Close()
-			}
+			mgr.Close()
 			return nil
 		},
 	}
@@ -588,6 +575,17 @@ func newProxyCmd() *cobra.Command {
 
 	proxyCmd.AddCommand(addCmd, listCmd, removeCmd, checkCmd)
 	return proxyCmd
+}
+
+func countExitPoints(exitPointsJSON string) int {
+	if exitPointsJSON == "" {
+		return 0
+	}
+	var arr []interface{}
+	if err := json.Unmarshal([]byte(exitPointsJSON), &arr); err != nil {
+		return 0
+	}
+	return len(arr)
 }
 
 func isTerminal() bool {

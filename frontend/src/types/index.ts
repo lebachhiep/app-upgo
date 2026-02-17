@@ -8,6 +8,14 @@ export interface RelayStats {
   active_streams: number
   connected_nodes: number
   timestamp: number
+  exit_points_json: string
+  node_addresses_json: string
+}
+
+export interface ExitPoint {
+  type: string       // "direct", "socks5", "http", "https"
+  country: string    // ISO 3166-1 alpha-2
+  ip_address: string
 }
 
 export interface RelayStatus {

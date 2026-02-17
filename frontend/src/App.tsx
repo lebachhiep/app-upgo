@@ -16,6 +16,8 @@ function App() {
   const [isRunning, setIsRunning] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const startingRef = useRef(false)
+  const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const rawConnectedRef = useRef(false)
   const [savedPartnerId, setSavedPartnerId] = useState('')
   const [showStartDialog, setShowStartDialog] = useState(false)
   const [startPartnerId, setStartPartnerId] = useState('')
@@ -24,7 +26,6 @@ function App() {
   const [zoom, setZoom] = useState(1.0)
   const [libStatus, setLibStatus] = useState<{ status: string; detail: string } | null>(null)
   const [proxyStatuses, setProxyStatuses] = useState<ProxyStatus[]>([])
-  const [directStats, setDirectStats] = useState<RelayStats | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const zoomRef = useRef(1.0)
 
@@ -67,7 +68,8 @@ function App() {
       const s = await AppService.GetStatus()
       if (s) {
         setStatus(s)
-        setIsConnected(s.IsConnected)
+        // Only update connected state if truly connected (disconnects are debounced via status:change events)
+        if (s.IsConnected) setIsConnected(true)
         if (s.PartnerId) setSavedPartnerId(s.PartnerId)
         if (s.Stats) setLiveStats(s.Stats)
       }
@@ -108,14 +110,28 @@ function App() {
     if (onStarted) cleanups.push(onStarted)
 
     const onStopped = RuntimeService.EventsOn('relay:stopped', () => {
-      setIsRunning(false); setIsConnected(false); setLiveStats(null); setDirectStats(null)
+      setIsRunning(false); setIsConnected(false); setLiveStats(null)
       setProxyStatuses(prev => prev.map(ps => ({ ...ps, bytes_sent: 0, bytes_recv: 0, since: 0 })))
       fetchStatus()
     })
     if (onStopped) cleanups.push(onStopped)
 
     const onStatus = RuntimeService.EventsOn('status:change', (c: unknown) => {
-      setIsConnected(c as boolean)
+      const connected = c as boolean
+      rawConnectedRef.current = connected
+      if (connected) {
+        // Connected → show immediately, cancel any pending disconnect timer
+        if (disconnectTimerRef.current) { clearTimeout(disconnectTimerRef.current); disconnectTimerRef.current = null }
+        setIsConnected(true)
+      } else {
+        // Disconnected → debounce 25s before showing (SDK reconnects + watchdog restart cycle)
+        if (!disconnectTimerRef.current) {
+          disconnectTimerRef.current = setTimeout(() => {
+            disconnectTimerRef.current = null
+            if (!rawConnectedRef.current) setIsConnected(false)
+          }, 25000)
+        }
+      }
     })
     if (onStatus) cleanups.push(onStatus)
 
@@ -143,12 +159,6 @@ function App() {
     })
     if (onProxyStatus) cleanups.push(onProxyStatus)
 
-    const onDirectStats = RuntimeService.EventsOn('direct:stats', (d: unknown) => {
-      const s = d as RelayStats
-      if (s) setDirectStats(s)
-    })
-    if (onDirectStats) cleanups.push(onDirectStats)
-
     // Sync proxy list changes from Settings → Dashboard
     const onProxiesUpdated = RuntimeService.EventsOn('proxies:updated', (d: unknown) => {
       const proxies = d as string[]
@@ -172,6 +182,7 @@ function App() {
 
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
+      if (disconnectTimerRef.current) clearTimeout(disconnectTimerRef.current)
       cleanups.forEach(c => c())
     }
   }, [fetchStatus])
@@ -241,7 +252,7 @@ function App() {
           height: `calc((100vh - ${TITLEBAR_HEIGHT}px) / ${zoom})`,
         }}>
           <div style={{ height: '100%', overflow: 'hidden', padding: '12px 14px', background: '#142334' }}>
-            <Dashboard status={status} stats={liveStats} isRunning={isRunning} isConnected={isConnected} libStatus={libStatus} onStart={handleStart} onStop={handleStop} hasPartnerId={!!savedPartnerId} proxyStatuses={proxyStatuses} directStats={directStats} partnerId={savedPartnerId} onPartnerIdChange={setSavedPartnerId} />
+            <Dashboard status={status} stats={liveStats} isRunning={isRunning} libStatus={libStatus} onStart={handleStart} onStop={handleStop} hasPartnerId={!!savedPartnerId} proxyStatuses={proxyStatuses} partnerId={savedPartnerId} onPartnerIdChange={setSavedPartnerId} />
           </div>
         </div>
 

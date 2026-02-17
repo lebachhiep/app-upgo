@@ -18,7 +18,11 @@ func installedExePath() string {
 }
 
 func copySelf(currentExe, targetExe string) error {
-	return copyFile(currentExe, targetExe)
+	if err := copyFile(currentExe, targetExe); err != nil {
+		return err
+	}
+	copyCompanionLibs(filepath.Dir(currentExe), filepath.Dir(targetExe))
+	return nil
 }
 
 func relaunch(targetExe string, args []string) {

@@ -16,20 +16,18 @@ import {
   EditOutlined,
 } from '@ant-design/icons'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
-import { AppService } from '@/services/wails'
-import type { RelayStats, RelayStatus, ProxyStatus } from '@/types'
+import { AppService, RuntimeService } from '@/services/wails'
+import type { RelayStats, RelayStatus, ProxyStatus, ExitPoint } from '@/types'
 
 interface DashboardProps {
   status: RelayStatus | null
   stats: RelayStats | null
   isRunning: boolean
-  isConnected: boolean
   libStatus?: { status: string; detail: string } | null
   onStart: (partnerId?: string) => void
   onStop: () => void
   hasPartnerId?: boolean
   proxyStatuses?: ProxyStatus[]
-  directStats?: RelayStats | null
   partnerId: string
   onPartnerIdChange: (id: string) => void
 }
@@ -46,7 +44,7 @@ const initChart = (): ChartPoint[] => {
   })
 }
 
-function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, onStop, hasPartnerId, proxyStatuses, directStats, partnerId, onPartnerIdChange }: DashboardProps) {
+function Dashboard({ status, stats, isRunning, libStatus, onStart, onStop, hasPartnerId, proxyStatuses, partnerId, onPartnerIdChange }: DashboardProps) {
   const [chartData, setChartData] = useState<ChartPoint[]>(initChart)
   const prevStatsRef = useRef<{ sent: number; recv: number } | null>(null)
   const [localProxies, setLocalProxies] = useState<ProxyStatus[]>([])
@@ -58,6 +56,8 @@ function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, 
   const [launchOnStartup, setLaunchOnStartup] = useState(false)
   const [editingPid, setEditingPid] = useState(false)
   const [pidDraft, setPidDraft] = useState('')
+  const [logModal, setLogModal] = useState<{ open: boolean; idx: number; label: string; logs: string[] }>({ open: false, idx: -2, label: '', logs: [] })
+  const logEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     AppService.GetLaunchOnStartup().then(v => { if (v !== undefined) setLaunchOnStartup(v) }).catch(() => {})
@@ -133,6 +133,25 @@ function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, 
     try { await AppService.SetLaunchOnStartup(checked) } catch { setLaunchOnStartup(!checked) }
   }, [])
 
+  // Live-stream logs into the open modal
+  useEffect(() => {
+    if (!logModal.open) return
+    const cleanup = RuntimeService.EventsOn('log:entry', (d: unknown) => {
+      const ev = d as { idx: number; msg: string }
+      if (ev && ev.idx === logModal.idx) {
+        setLogModal(prev => ({ ...prev, logs: [...prev.logs, ev.msg].slice(-500) }))
+      }
+    })
+    return () => { if (cleanup) cleanup() }
+  }, [logModal.open, logModal.idx])
+
+  // Auto-scroll to bottom when logs update
+  useEffect(() => {
+    if (logModal.open && logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [logModal.logs, logModal.open])
+
   const handlePidEdit = useCallback(() => {
     setPidDraft(partnerId)
     setEditingPid(true)
@@ -196,7 +215,37 @@ function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, 
     }
   }, [chartData])
 
-  const aliveCount = localProxies.filter(p => p.alive).length + (isRunning ? 1 : 0)
+  const exitPoints: ExitPoint[] = useMemo(() => {
+    if (!stats?.exit_points_json) return []
+    try { return JSON.parse(stats.exit_points_json) } catch { return [] }
+  }, [stats?.exit_points_json])
+
+  const nodeAddresses: string[] = useMemo(() => {
+    if (!stats?.node_addresses_json) return []
+    try { return JSON.parse(stats.node_addresses_json) } catch { return [] }
+  }, [stats?.node_addresses_json])
+
+  const directExit = exitPoints.find(ep => ep.type === 'direct')
+
+  // Map proxy host IP → exit point for inline display in proxy rows
+  const proxyExitMap = useMemo(() => {
+    const map = new Map<string, ExitPoint>()
+    for (const ep of exitPoints) {
+      if (ep.type !== 'direct') map.set(ep.ip_address, ep)
+    }
+    return map
+  }, [exitPoints])
+
+  // Extract host IP from proxy URL (e.g. "socks5://user:pass@1.2.3.4:8080" → "1.2.3.4")
+  const getProxyHost = (url: string): string => {
+    try {
+      const withoutScheme = url.replace(/^[a-z0-9]+:\/\//, '')
+      const afterAt = withoutScheme.includes('@') ? withoutScheme.split('@')[1] : withoutScheme
+      return afterAt.split(':')[0]
+    } catch { return '' }
+  }
+
+  const aliveCount = localProxies.filter(p => p.alive).length
   const isDebug = status?.PartnerId === 'test'
 
   return (
@@ -259,8 +308,8 @@ function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, 
         <Col xs={12} sm={6}>
           <Card size="small" style={CARD} bodyStyle={{ padding: '8px 10px' }}>
             <div style={st.statLabel}><CloudServerOutlined style={st.statIcon} /><span>Nodes</span></div>
-            <div style={st.statValue}>{stats?.connected_nodes ?? 0}</div>
-            <div style={st.statSub}>{stats?.active_streams ?? 0} streams &middot; {stats?.total_streams ?? 0} total</div>
+            <div style={st.statValue} title={nodeAddresses.length > 0 ? nodeAddresses.join(', ') : undefined}>{stats?.connected_nodes ?? 0}</div>
+            <div style={st.statSub}>{stats?.active_streams ?? 0} streams &middot; {exitPoints.length} exits</div>
           </Card>
         </Col>
         <Col xs={12} sm={6}>
@@ -335,8 +384,11 @@ function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, 
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '5px 10px', borderBottom: '1px solid #1E344E', flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ color: '#8B97A7', fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Proxies</span>
-            <Tag style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }} color="success">{aliveCount} alive</Tag>
+            <span style={{ color: '#8B97A7', fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Exit Points</span>
+            {isRunning && exitPoints.length > 0 && (
+              <Tag style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }} color="cyan">{exitPoints.length} exits</Tag>
+            )}
+            <Tag style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }} color="success">{aliveCount} proxy</Tag>
             <Tag style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }} color="error">{localProxies.filter(p => !p.alive && p.error !== 'checking').length} dead</Tag>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -364,44 +416,34 @@ function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, 
         </div>
         {/* Scrollable rows */}
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-          {/* Direct row — always shown when relay is running */}
-          {isRunning && (() => {
-            const ds = directStats
-            const dUp = ds?.uptime ?? 0
-            const dAvgUp = dUp > 0 ? (ds?.bytes_sent ?? 0) / dUp : 0
-            const dAvgDown = dUp > 0 ? (ds?.bytes_recv ?? 0) / dUp : 0
-            return (
-              <div style={{ display: 'flex', alignItems: 'center', padding: '4px 10px', borderBottom: '1px solid #172A3E', fontSize: 9 }}>
-                <span style={{ width: 18, color: '#8B97A7', fontFamily: 'monospace' }}></span>
-                <span style={{ width: 46 }}>
-                  <Tag style={{ margin: 0, fontSize: 7, lineHeight: '12px', padding: '0 3px', color: '#52c41a', borderColor: '#52c41a44', background: '#52c41a11' }}>DIRECT</Tag>
-                </span>
-                <span style={{ flex: 1, fontFamily: 'monospace', color: '#8B97A7' }}>No proxy</span>
-                <span style={{ width: 44, textAlign: 'right', fontFamily: 'monospace', color: '#8B97A7' }}>-</span>
-                <span style={{ width: 60, textAlign: 'right', fontFamily: 'monospace', color: '#22edeb' }}>{fmtUptime(dUp)}</span>
-                <span style={{ width: 52, textAlign: 'right', fontFamily: 'monospace', color: '#e0e0f0' }}>{fmtBytes(ds?.bytes_sent ?? 0)}</span>
-                <span style={{ width: 52, textAlign: 'right', fontFamily: 'monospace', color: '#bfc3d0' }}>{fmtBytes(ds?.bytes_recv ?? 0)}</span>
-                <span style={{ width: 50, textAlign: 'right', fontFamily: 'monospace', color: '#22edeb' }}>{bpsToMbps(dAvgUp)}</span>
-                <span style={{ width: 50, textAlign: 'right', fontFamily: 'monospace', color: '#bfc3d0' }}>{bpsToMbps(dAvgDown)}</span>
-                <span style={{ width: 34, textAlign: 'center' }}>
-                  {isConnected ? (
-                    <Tag style={{ margin: 0, fontSize: 7, lineHeight: '12px', padding: '0 3px' }} color="success">OK</Tag>
-                  ) : (
-                    <Tag style={{ margin: 0, fontSize: 7, lineHeight: '12px', padding: '0 3px' }} color="warning">...</Tag>
-                  )}
-                </span>
-                <span style={{ width: 36 }}></span>
-              </div>
-            )
-          })()}
+          {/* Direct exit point row */}
+          {isRunning && directExit && (
+            <div style={{ display: 'flex', alignItems: 'center', padding: '4px 10px', borderBottom: '1px solid #172A3E', fontSize: 9, background: '#1A2B3C' }}>
+              <span style={{ width: 18, color: '#8B97A7', fontFamily: 'monospace' }}>-</span>
+              <span style={{ width: 46 }}>
+                <Tag style={{ margin: 0, fontSize: 7, lineHeight: '12px', padding: '0 3px', color: '#52c41a', borderColor: '#52c41a44', background: '#52c41a11' }}>DIRECT</Tag>
+              </span>
+              <span style={{ flex: 1, fontFamily: 'monospace', color: '#e0e0f0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={directExit.ip_address}>
+                {directExit.ip_address} <span style={{ color: '#8B97A7', fontSize: 8 }}>({directExit.country})</span>
+              </span>
+              <span style={{ width: 44, textAlign: 'right', fontFamily: 'monospace', color: '#52c41a' }}>-</span>
+              <span style={{ width: 60, textAlign: 'right', fontFamily: 'monospace', color: '#22edeb' }}>{fmtUptime(stats?.uptime ?? 0)}</span>
+              <span style={{ width: 52, textAlign: 'right', fontFamily: 'monospace', color: '#e0e0f0' }}>{fmtBytes(stats?.bytes_sent ?? 0)}</span>
+              <span style={{ width: 52, textAlign: 'right', fontFamily: 'monospace', color: '#bfc3d0' }}>{fmtBytes(stats?.bytes_recv ?? 0)}</span>
+              <span style={{ width: 50, textAlign: 'right', fontFamily: 'monospace', color: '#22edeb' }}>{stats?.uptime ? bpsToMbps((stats.bytes_sent ?? 0) / stats.uptime) : '0.00'}</span>
+              <span style={{ width: 50, textAlign: 'right', fontFamily: 'monospace', color: '#bfc3d0' }}>{stats?.uptime ? bpsToMbps((stats.bytes_recv ?? 0) / stats.uptime) : '0.00'}</span>
+              <span style={{ width: 34, textAlign: 'center' }}>
+                <Tag style={{ margin: 0, fontSize: 7, lineHeight: '12px', padding: '0 3px' }} color="success">OK</Tag>
+              </span>
+              <span style={{ width: 36 }}></span>
+            </div>
+          )}
           {/* Proxy rows */}
           {localProxies.map((ps, i) => {
             const isChecking = ps.error === 'checking' || checkingIdx.has(i)
             const upSec = isRunning && ps.alive && ps.since > 0 ? Math.max(0, now - ps.since) : 0
             const pColor = ps.protocol === 'socks5' ? '#a78bfa' : ps.protocol === 'https' ? '#22edeb' : ps.protocol === 'http' ? '#faad14' : '#8B97A7'
-            // Per-proxy avg speed: bytes / uptime
-            const pAvgUp = upSec > 0 ? (ps.bytes_sent ?? 0) / upSec : 0
-            const pAvgDown = upSec > 0 ? (ps.bytes_recv ?? 0) / upSec : 0
+            const matchedExit = proxyExitMap.get(getProxyHost(ps.url))
 
             return (
               <div key={ps.url} style={{ display: 'flex', alignItems: 'center', padding: '4px 10px', borderBottom: '1px solid #172A3E', fontSize: 9 }}>
@@ -415,25 +457,20 @@ function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, 
                     <Tag style={{ margin: 0, fontSize: 7, lineHeight: '12px', padding: '0 3px' }} color="default">N/A</Tag>
                   )}
                 </span>
-                <span style={{ flex: 1, fontFamily: 'monospace', color: '#e0e0f0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={ps.url}>{ps.url}</span>
+                <span style={{ flex: 1, fontFamily: 'monospace', color: '#e0e0f0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={ps.url}>
+                  {ps.url}
+                  {matchedExit && <span style={{ color: '#52c41a', fontSize: 8, marginLeft: 6 }}>exit: {matchedExit.ip_address} ({matchedExit.country})</span>}
+                </span>
                 <span style={{ width: 44, textAlign: 'right', fontFamily: 'monospace', color: ps.alive ? '#52c41a' : '#8B97A7' }}>
                   {isChecking ? '...' : `${ps.latency}ms`}
                 </span>
                 <span style={{ width: 60, textAlign: 'right', fontFamily: 'monospace', color: ps.alive ? '#22edeb' : '#8B97A7' }}>
                   {isChecking ? '...' : ps.alive ? fmtUptime(upSec) : '-'}
                 </span>
-                <span style={{ width: 52, textAlign: 'right', fontFamily: 'monospace', color: ps.alive ? '#e0e0f0' : '#8B97A7' }}>
-                  {ps.alive ? fmtBytes(ps.bytes_sent ?? 0) : '-'}
-                </span>
-                <span style={{ width: 52, textAlign: 'right', fontFamily: 'monospace', color: ps.alive ? '#bfc3d0' : '#8B97A7' }}>
-                  {ps.alive ? fmtBytes(ps.bytes_recv ?? 0) : '-'}
-                </span>
-                <span style={{ width: 50, textAlign: 'right', fontFamily: 'monospace', color: ps.alive ? '#22edeb' : '#8B97A7' }}>
-                  {ps.alive ? `${bpsToMbps(pAvgUp)}` : '-'}
-                </span>
-                <span style={{ width: 50, textAlign: 'right', fontFamily: 'monospace', color: ps.alive ? '#bfc3d0' : '#8B97A7' }}>
-                  {ps.alive ? `${bpsToMbps(pAvgDown)}` : '-'}
-                </span>
+                <span style={{ width: 52, textAlign: 'right', fontFamily: 'monospace', color: '#8B97A7' }}>-</span>
+                <span style={{ width: 52, textAlign: 'right', fontFamily: 'monospace', color: '#8B97A7' }}>-</span>
+                <span style={{ width: 50, textAlign: 'right', fontFamily: 'monospace', color: '#8B97A7' }}>-</span>
+                <span style={{ width: 50, textAlign: 'right', fontFamily: 'monospace', color: '#8B97A7' }}>-</span>
                 <span style={{ width: 34, textAlign: 'center' }}>
                   {isChecking ? (
                     <LoadingOutlined spin style={{ fontSize: 10, color: '#1890ff' }} />
@@ -461,7 +498,7 @@ function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, 
           <span style={{ width: 46 }}>
             <Tag style={{ margin: 0, fontSize: 7, lineHeight: '12px', padding: '0 3px', color: '#e0e0f0', borderColor: '#e0e0f044', background: '#e0e0f011' }}>TOTAL</Tag>
           </span>
-          <span style={{ flex: 1, fontFamily: 'monospace', color: '#8B97A7' }}>{aliveCount > 0 ? `${aliveCount} proxies active` : '—'}</span>
+          <span style={{ flex: 1, fontFamily: 'monospace', color: '#8B97A7' }}>{isRunning ? (`${exitPoints.length} exit${exitPoints.length !== 1 ? 's' : ''}` + (aliveCount > 0 ? ` · ${aliveCount} proxy` : ' · direct')) : '—'}</span>
           <span style={{ width: 44 }}></span>
           <span style={{ width: 60, textAlign: 'right', fontFamily: 'monospace', color: '#22edeb' }}>{fmtUptime(stats?.uptime ?? 0)}</span>
           <span style={{ width: 52, textAlign: 'right', fontFamily: 'monospace', color: '#e0e0f0', fontWeight: 600 }}>{fmtBytes(stats?.bytes_sent ?? 0)}</span>
@@ -492,6 +529,38 @@ function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, 
           onChange={(e) => setProxyText(e.target.value)}
           style={{ fontFamily: "'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace", fontSize: 12 }}
         />
+      </Modal>
+
+      {/* Per-entry Logs Modal */}
+      <Modal
+        title={<span style={{ fontSize: 13, fontWeight: 600 }}>Logs: {logModal.label}</span>}
+        open={logModal.open}
+        onCancel={() => setLogModal(prev => ({ ...prev, open: false }))}
+        footer={null}
+        width={620}
+        styles={{ body: { padding: 0 } }}
+      >
+        <div style={{
+          background: '#0d1117',
+          borderRadius: 6,
+          padding: '8px 0',
+          maxHeight: 400,
+          overflowY: 'auto',
+          fontFamily: "'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace",
+          fontSize: 11,
+          lineHeight: 1.6,
+        }}>
+          {logModal.logs.length === 0 ? (
+            <div style={{ padding: '16px', textAlign: 'center', color: '#8B97A7' }}>No logs yet</div>
+          ) : (
+            logModal.logs.map((line, i) => (
+              <div key={i} style={{ padding: '0 12px', color: '#c9d1d9', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                {line}
+              </div>
+            ))
+          )}
+          <div ref={logEndRef} />
+        </div>
       </Modal>
     </div>
   )

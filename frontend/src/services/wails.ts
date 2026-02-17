@@ -28,6 +28,7 @@ declare global {
           IsWindowMaximised(): Promise<boolean>
           CheckProxy(proxyUrl: string): Promise<ProxyStatus>
           CheckAllProxies(): Promise<ProxyStatus[]>
+          GetEntryLogs(idx: number): Promise<string[]>
         }
       }
     }
@@ -67,6 +68,7 @@ export const AppService = {
   IsWindowMaximised: () => window.go?.main?.App?.IsWindowMaximised(),
   CheckProxy: (proxyUrl: string) => window.go?.main?.App?.CheckProxy(proxyUrl),
   CheckAllProxies: () => window.go?.main?.App?.CheckAllProxies(),
+  GetEntryLogs: (idx: number) => window.go?.main?.App?.GetEntryLogs(idx),
 }
 
 export const RuntimeService = {

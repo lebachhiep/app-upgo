@@ -21,20 +21,14 @@ import (
 	"relay-app/internal/window"
 )
 
-// proxyMgrEntry wraps a per-proxy RelayManager with its index and latest stats.
-type proxyMgrEntry struct {
-	mgr       *relay.RelayManager
-	proxyIdx  int                         // index in proxyStatuses[], -1 if no proxy
-	lastStats atomic.Pointer[relay.Stats] // latest stats from this manager (atomic for concurrent access)
-}
-
 type App struct {
 	ctx           context.Context
 	version       string
 	manager       *relay.RelayManager // control manager (EnsureLibrary only, never Started)
-	directEntry   *proxyMgrEntry      // always-on direct (no proxy) SDK instance
-	proxyMgrs     []*proxyMgrEntry    // one per alive proxy (each has own SDK client)
-	proxyMgrsMu   sync.RWMutex
+	relayMgr      *relay.RelayManager // single SDK client with all proxies
+	relayMu       sync.RWMutex
+	relayStarting bool                        // true while StartRelay is in progress
+	lastStats     atomic.Pointer[relay.Stats] // latest stats from single client
 	mu            sync.RWMutex
 	logs          []string
 	logMu         sync.RWMutex
@@ -153,7 +147,7 @@ func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
-	a.stopAllProxyMgrs()
+	a.stopRelay()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.manager != nil {
@@ -174,8 +168,15 @@ func (a *App) StartRelay(partnerId string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Stop any existing proxy managers first
-	a.stopAllProxyMgrs()
+	// Mark as starting so isRelayRunning() returns true during proxy checks
+	a.relayMu.Lock()
+	a.relayStarting = true
+	a.relayMu.Unlock()
+	defer func() {
+		a.relayMu.Lock()
+		a.relayStarting = false
+		a.relayMu.Unlock()
+	}()
 
 	cfg := config.Get()
 	verbose := cfg.GetBool("verbose")
@@ -220,33 +221,73 @@ func (a *App) StartRelay(partnerId string) error {
 		runtime.EventsEmit(a.ctx, "proxy:status", allStatuses)
 	}
 
-	// Always create a direct (no proxy) SDK instance
-	a.proxyMgrsMu.Lock()
-	a.proxyMgrs = nil
-	a.directEntry = a.createDirectMgrEntry(verbose, discoveryUrl, partnerId)
-	if a.directEntry == nil {
-		a.proxyMgrsMu.Unlock()
-		return fmt.Errorf("failed to create direct node instance")
+	// Create SINGLE SDK client with all proxies
+	mgr := relay.NewRelayManager()
+	mgr.OnLog = func(msg string) {
+		a.addLog(msg)
+		runtime.EventsEmit(a.ctx, "log:new", msg)
+	}
+	mgr.OnStatsUpdate = func(stats *relay.Stats) {
+		a.lastStats.Store(stats)
+		runtime.EventsEmit(a.ctx, "stats:update", stats)
+	}
+	mgr.OnStatusChange = func(connected bool) {
+		runtime.EventsEmit(a.ctx, "status:change", connected)
+	}
+	mgr.OnNeedRestart = func() {
+		// Fallback: Restart() inside the manager failed, do a full StartRelay
+		cfg := config.Get()
+		pid := cfg.GetString("partner_id")
+		if pid != "" {
+			log.Info().Msg("Watchdog fallback: full relay restart")
+			if err := a.StartRelay(pid); err != nil {
+				log.Error().Err(err).Msg("Watchdog fallback: relay restart failed")
+			}
+		}
 	}
 
-	// Create one SDK instance per alive proxy
-	startedCount := 0
-	for i, ps := range allStatuses {
+	if err := mgr.Init(verbose); err != nil {
+		return fmt.Errorf("failed to init node: %w", err)
+	}
+
+	if discoveryUrl != "" {
+		if err := mgr.SetDiscoveryURL(discoveryUrl); err != nil {
+			log.Warn().Err(err).Msg("Failed to set discovery URL")
+		}
+	}
+
+	// Add all alive proxies to the single client
+	addedCount := 0
+	for _, ps := range allStatuses {
 		if !ps.Alive {
 			continue
 		}
 		proxyURL := proxy.BuildProxyURL(ps.URL, ps.Protocol)
-		entry := a.createProxyMgrEntry(i, proxyURL, verbose, discoveryUrl, partnerId)
-		if entry != nil {
-			a.proxyMgrs = append(a.proxyMgrs, entry)
-			startedCount++
+		if err := mgr.AddProxy(proxyURL); err != nil {
+			log.Warn().Err(err).Str("proxy", ps.URL).Msg("Failed to add proxy")
 		} else {
-			log.Warn().Str("proxy", ps.URL).Msg("Failed to create manager for proxy")
+			addedCount++
 		}
 	}
-	a.proxyMgrsMu.Unlock()
 
-	log.Info().Int("proxies_started", startedCount).Int("proxies_total", len(proxies)).Msg("Node instances started (+ direct)")
+	if err := mgr.Start(partnerId); err != nil {
+		mgr.Close()
+		return fmt.Errorf("failed to start node: %w", err)
+	}
+
+	// Atomic swap: stop old relay, install new one
+	a.relayMu.Lock()
+	old := a.relayMgr
+	a.relayMgr = mgr
+	a.relayMu.Unlock()
+
+	// Clean up old relay (if any) outside the lock
+	if old != nil {
+		_ = old.Stop()
+		old.Close()
+	}
+
+	log.Info().Int("proxies_added", addedCount).Int("proxies_total", len(proxies)).Msg("Single SDK client started with all proxies")
 
 	// Auto-enable launch_on_startup + auto_start on first Partner ID
 	oldPartnerId := cfg.GetString("partner_id")
@@ -273,114 +314,11 @@ func (a *App) StartRelay(partnerId string) error {
 	return nil
 }
 
-// createProxyMgrEntry creates a new RelayManager for a single proxy, inits and starts it.
-// proxyIdx is the index in proxyStatuses[] (-1 if no proxy).
-func (a *App) createProxyMgrEntry(proxyIdx int, proxyURL string, verbose bool, discoveryUrl, partnerId string) *proxyMgrEntry {
-	mgr := relay.NewRelayManager()
-	entry := &proxyMgrEntry{mgr: mgr, proxyIdx: proxyIdx}
-
-	mgr.OnLog = func(msg string) {
-		a.addLog(msg)
-		runtime.EventsEmit(a.ctx, "log:new", msg)
-	}
-
-	mgr.OnStatsUpdate = func(stats *relay.Stats) {
-		entry.lastStats.Store(stats)
-		// Update per-proxy bandwidth directly from this manager's stats
-		if proxyIdx >= 0 {
-			a.proxyStatusMu.Lock()
-			if proxyIdx < len(a.proxyStatuses) {
-				a.proxyStatuses[proxyIdx].BytesSent = stats.BytesSent
-				a.proxyStatuses[proxyIdx].BytesRecv = stats.BytesRecv
-			}
-			statuses := make([]proxy.Status, len(a.proxyStatuses))
-			copy(statuses, a.proxyStatuses)
-			a.proxyStatusMu.Unlock()
-			runtime.EventsEmit(a.ctx, "proxy:status", statuses)
-		}
-		// Emit aggregated stats for the dashboard
-		a.emitAggregateStats()
-	}
-
-	mgr.OnStatusChange = func(connected bool) {
-		// Emit aggregate connected status
-		a.emitAggregateConnected()
-	}
-
-	if err := mgr.Init(verbose); err != nil {
-		log.Warn().Err(err).Str("proxy", proxyURL).Msg("Failed to init node manager")
-		return nil
-	}
-
-	if discoveryUrl != "" {
-		if err := mgr.SetDiscoveryURL(discoveryUrl); err != nil {
-			log.Warn().Err(err).Msg("Failed to set discovery URL")
-		}
-	}
-
-	if proxyURL != "" {
-		if err := mgr.AddProxy(proxyURL); err != nil {
-			log.Warn().Err(err).Str("proxy", proxyURL).Msg("Failed to add proxy")
-			mgr.Close()
-			return nil
-		}
-	}
-
-	if err := mgr.Start(partnerId); err != nil {
-		log.Warn().Err(err).Str("proxy", proxyURL).Msg("Failed to start node manager")
-		mgr.Close()
-		return nil
-	}
-
-	return entry
-}
-
-// createDirectMgrEntry creates a direct (no proxy) RelayManager.
-// Its stats are emitted via "direct:stats" so the UI can show a Direct row.
-func (a *App) createDirectMgrEntry(verbose bool, discoveryUrl, partnerId string) *proxyMgrEntry {
-	mgr := relay.NewRelayManager()
-	entry := &proxyMgrEntry{mgr: mgr, proxyIdx: -1}
-
-	mgr.OnLog = func(msg string) {
-		a.addLog(msg)
-		runtime.EventsEmit(a.ctx, "log:new", msg)
-	}
-
-	mgr.OnStatsUpdate = func(stats *relay.Stats) {
-		entry.lastStats.Store(stats)
-		runtime.EventsEmit(a.ctx, "direct:stats", stats)
-		a.emitAggregateStats()
-	}
-
-	mgr.OnStatusChange = func(connected bool) {
-		a.emitAggregateConnected()
-	}
-
-	if err := mgr.Init(verbose); err != nil {
-		log.Warn().Err(err).Msg("Failed to init direct node manager")
-		return nil
-	}
-
-	if discoveryUrl != "" {
-		if err := mgr.SetDiscoveryURL(discoveryUrl); err != nil {
-			log.Warn().Err(err).Msg("Failed to set discovery URL for direct manager")
-		}
-	}
-
-	if err := mgr.Start(partnerId); err != nil {
-		log.Warn().Err(err).Msg("Failed to start direct node manager")
-		mgr.Close()
-		return nil
-	}
-
-	return entry
-}
-
 func (a *App) StopRelay() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.stopAllProxyMgrs()
+	a.stopRelay()
 
 	runtime.EventsEmit(a.ctx, "relay:stopped", true)
 	return nil
@@ -400,77 +338,22 @@ func (a *App) GetStatus() (*RelayStatusResponse, error) {
 	resp := &RelayStatusResponse{
 		PartnerId: cfg.GetString("partner_id"),
 		Proxies:   cfg.GetStringSlice("proxies"),
+		Version:   relay.GetLibraryVersion(),
 	}
 
-	a.proxyMgrsMu.RLock()
-	defer a.proxyMgrsMu.RUnlock()
+	a.relayMu.RLock()
+	mgr := a.relayMgr
+	a.relayMu.RUnlock()
 
-	if a.directEntry == nil && len(a.proxyMgrs) == 0 {
+	if mgr == nil {
 		return resp, nil
 	}
 
-	var totalSent, totalRecv, maxUptime, totalStreams, reconnectCount int64
-	var activeStreams, connectedNodes int32
-	anyConnected := false
+	resp.IsConnected = mgr.LastConnected()
+	resp.DeviceId = mgr.CachedDeviceId()
 
-	// Include direct entry
-	if a.directEntry != nil {
-		status := a.directEntry.mgr.GetStatus()
-		if status.Connected {
-			anyConnected = true
-		}
-		if resp.DeviceId == "" && status.DeviceId != "" {
-			resp.DeviceId = status.DeviceId
-		}
-		if resp.Version == "" && status.Version != "" {
-			resp.Version = status.Version
-		}
-		if status.Stats != nil {
-			totalSent += status.Stats.BytesSent
-			totalRecv += status.Stats.BytesRecv
-			maxUptime = status.Stats.Uptime
-			totalStreams += status.Stats.TotalStreams
-			activeStreams += status.Stats.ActiveStreams
-			connectedNodes += status.Stats.ConnectedNodes
-			reconnectCount += status.Stats.ReconnectCount
-		}
-	}
-
-	// Include proxy entries
-	for _, entry := range a.proxyMgrs {
-		status := entry.mgr.GetStatus()
-		if status.Connected {
-			anyConnected = true
-		}
-		if resp.DeviceId == "" && status.DeviceId != "" {
-			resp.DeviceId = status.DeviceId
-		}
-		if resp.Version == "" && status.Version != "" {
-			resp.Version = status.Version
-		}
-		if status.Stats != nil {
-			totalSent += status.Stats.BytesSent
-			totalRecv += status.Stats.BytesRecv
-			if status.Stats.Uptime > maxUptime {
-				maxUptime = status.Stats.Uptime
-			}
-			totalStreams += status.Stats.TotalStreams
-			activeStreams += status.Stats.ActiveStreams
-			connectedNodes += status.Stats.ConnectedNodes
-			reconnectCount += status.Stats.ReconnectCount
-		}
-	}
-
-	resp.IsConnected = anyConnected
-	resp.Stats = &relay.Stats{
-		BytesSent:      totalSent,
-		BytesRecv:      totalRecv,
-		Uptime:         maxUptime,
-		TotalStreams:   totalStreams,
-		ActiveStreams:  activeStreams,
-		ConnectedNodes: connectedNodes,
-		ReconnectCount: reconnectCount,
-		Timestamp:      time.Now().Unix(),
+	if stats := a.lastStats.Load(); stats != nil {
+		resp.Stats = stats
 	}
 
 	return resp, nil
@@ -481,9 +364,9 @@ func (a *App) IsRelayRunning() bool {
 }
 
 func (a *App) isRelayRunning() bool {
-	a.proxyMgrsMu.RLock()
-	defer a.proxyMgrsMu.RUnlock()
-	return a.directEntry != nil || len(a.proxyMgrs) > 0
+	a.relayMu.RLock()
+	defer a.relayMu.RUnlock()
+	return a.relayMgr != nil || a.relayStarting
 }
 
 func (a *App) GetConfig() map[string]interface{} {
@@ -562,14 +445,23 @@ func (a *App) RemoveProxy(proxyUrl string) error {
 		return err
 	}
 
-	// Stop proxy managers and clear statuses (proxy indices shift, must rebuild)
-	a.stopProxyMgrsOnly()
+	// Clear proxy statuses
 	a.proxyStatusMu.Lock()
 	a.proxyStatuses = nil
 	a.proxyStatusMu.Unlock()
 
 	runtime.EventsEmit(a.ctx, "proxy:status", []proxy.Status{})
 	runtime.EventsEmit(a.ctx, "proxies:updated", newProxies)
+
+	// Restart relay with updated proxy list (single client must be recreated)
+	partnerId := cfg.GetString("partner_id")
+	if partnerId != "" && a.isRelayRunning() {
+		go func() {
+			if err := a.StartRelay(partnerId); err != nil {
+				log.Error().Err(err).Msg("Failed to restart relay after proxy removal")
+			}
+		}()
+	}
 	return nil
 }
 
@@ -580,14 +472,23 @@ func (a *App) RemoveAllProxies() error {
 		return err
 	}
 
-	// Stop proxy managers and clear statuses
-	a.stopProxyMgrsOnly()
+	// Clear proxy statuses
 	a.proxyStatusMu.Lock()
 	a.proxyStatuses = nil
 	a.proxyStatusMu.Unlock()
 
 	runtime.EventsEmit(a.ctx, "proxy:status", []proxy.Status{})
 	runtime.EventsEmit(a.ctx, "proxies:updated", []string{})
+
+	// Restart relay (direct only, no proxies)
+	partnerId := cfg.GetString("partner_id")
+	if partnerId != "" && a.isRelayRunning() {
+		go func() {
+			if err := a.StartRelay(partnerId); err != nil {
+				log.Error().Err(err).Msg("Failed to restart relay after removing all proxies")
+			}
+		}()
+	}
 	return nil
 }
 
@@ -818,92 +719,14 @@ func (a *App) centerAndResize50() {
 	runtime.WindowCenter(a.ctx)
 }
 
-// stopAllProxyMgrs stops and closes all per-proxy relay managers.
-func (a *App) stopAllProxyMgrs() {
-	a.proxyMgrsMu.Lock()
-	defer a.proxyMgrsMu.Unlock()
+// stopRelay stops and closes the single relay manager.
+func (a *App) stopRelay() {
+	a.relayMu.Lock()
+	defer a.relayMu.Unlock()
 
-	if a.directEntry != nil {
-		_ = a.directEntry.mgr.Stop()
-		a.directEntry.mgr.Close()
-		a.directEntry = nil
+	if a.relayMgr != nil {
+		_ = a.relayMgr.Stop()
+		a.relayMgr.Close()
+		a.relayMgr = nil
 	}
-
-	for _, entry := range a.proxyMgrs {
-		_ = entry.mgr.Stop()
-		entry.mgr.Close()
-	}
-	a.proxyMgrs = nil
-}
-
-// stopProxyMgrsOnly stops proxy managers but keeps the direct entry running.
-func (a *App) stopProxyMgrsOnly() {
-	a.proxyMgrsMu.Lock()
-	defer a.proxyMgrsMu.Unlock()
-
-	for _, entry := range a.proxyMgrs {
-		_ = entry.mgr.Stop()
-		entry.mgr.Close()
-	}
-	a.proxyMgrs = nil
-}
-
-// emitAggregateStats sums stats from all managers (direct + proxies) and emits as stats:update.
-func (a *App) emitAggregateStats() {
-	a.proxyMgrsMu.RLock()
-	defer a.proxyMgrsMu.RUnlock()
-
-	var agg relay.Stats
-	// Include direct entry
-	if a.directEntry != nil {
-		if ds := a.directEntry.lastStats.Load(); ds != nil {
-			agg.BytesSent += ds.BytesSent
-			agg.BytesRecv += ds.BytesRecv
-			agg.Uptime = ds.Uptime
-			agg.TotalStreams += ds.TotalStreams
-			agg.ActiveStreams += ds.ActiveStreams
-			agg.ConnectedNodes += ds.ConnectedNodes
-			agg.ReconnectCount += ds.ReconnectCount
-		}
-	}
-	// Include proxy entries
-	for _, entry := range a.proxyMgrs {
-		if ls := entry.lastStats.Load(); ls != nil {
-			agg.BytesSent += ls.BytesSent
-			agg.BytesRecv += ls.BytesRecv
-			if ls.Uptime > agg.Uptime {
-				agg.Uptime = ls.Uptime
-			}
-			agg.TotalStreams += ls.TotalStreams
-			agg.ActiveStreams += ls.ActiveStreams
-			agg.ConnectedNodes += ls.ConnectedNodes
-			agg.ReconnectCount += ls.ReconnectCount
-		}
-	}
-	agg.Timestamp = time.Now().Unix()
-	runtime.EventsEmit(a.ctx, "stats:update", &agg)
-}
-
-// emitAggregateConnected checks if any manager (direct + proxies) is connected and emits status:change.
-func (a *App) emitAggregateConnected() {
-	a.proxyMgrsMu.RLock()
-	defer a.proxyMgrsMu.RUnlock()
-
-	anyConnected := false
-	if a.directEntry != nil {
-		status := a.directEntry.mgr.GetStatus()
-		if status.Connected {
-			anyConnected = true
-		}
-	}
-	if !anyConnected {
-		for _, entry := range a.proxyMgrs {
-			status := entry.mgr.GetStatus()
-			if status.Connected {
-				anyConnected = true
-				break
-			}
-		}
-	}
-	runtime.EventsEmit(a.ctx, "status:change", anyConnected)
 }

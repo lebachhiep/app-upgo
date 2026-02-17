@@ -1,5 +1,5 @@
-import { useCallback } from 'react'
-import { PlusOutlined, MinusOutlined } from '@ant-design/icons'
+import { useCallback, useState } from 'react'
+import { PlusOutlined, MinusOutlined, CopyOutlined, CheckOutlined } from '@ant-design/icons'
 import { AppService, RuntimeService } from '@/services/wails'
 
 interface TitleBarProps {
@@ -13,6 +13,8 @@ interface TitleBarProps {
 }
 
 function TitleBar({ deviceId, zoom, onZoomIn, onZoomOut, onZoomReset, isConnected, isRunning }: TitleBarProps) {
+  const [copied, setCopied] = useState(false)
+
   const handleClose = useCallback(() => {
     AppService.CloseWindow()
   }, [])
@@ -20,6 +22,14 @@ function TitleBar({ deviceId, zoom, onZoomIn, onZoomOut, onZoomReset, isConnecte
   const handleMinimise = useCallback(() => {
     RuntimeService.WindowMinimise()
   }, [])
+
+  const handleCopyDeviceId = useCallback(() => {
+    if (!deviceId) return
+    navigator.clipboard.writeText(deviceId).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    }).catch(() => {})
+  }, [deviceId])
 
   return (
     <div className="titlebar" style={styles.titleBar}>
@@ -31,7 +41,12 @@ function TitleBar({ deviceId, zoom, onZoomIn, onZoomOut, onZoomReset, isConnecte
             {isConnected ? 'Connected' : isRunning ? 'Connecting' : 'Offline'}
           </span>
           {deviceId && (
-            <span style={styles.deviceId}><span style={styles.deviceLabel}>ID:</span> {deviceId}</span>
+            <span className="titlebar-nodrag" style={styles.deviceId} title={`Click to copy: ${deviceId}`}>
+              <span style={styles.deviceLabel}>Device ID:</span> {deviceId}
+              <span onClick={handleCopyDeviceId} style={styles.copyBtn}>
+                {copied ? <CheckOutlined style={{ color: '#52c41a' }} /> : <CopyOutlined />}
+              </span>
+            </span>
           )}
         </div>
       </div>
@@ -104,6 +119,18 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#bfc3d0',
     fontFamily: "'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace",
     letterSpacing: 0.3,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 5,
+  },
+  copyBtn: {
+    cursor: 'pointer',
+    fontSize: 9,
+    color: '#8B97A7',
+    opacity: 0.6,
+    transition: 'opacity 0.15s',
+    display: 'inline-flex',
+    alignItems: 'center',
   },
   zoomGroup: {
     display: 'flex',
