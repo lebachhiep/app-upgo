@@ -90,7 +90,6 @@ func runGUI(silent bool) {
 	app.version = version
 	app.silentMode = silent
 
-	// Always start Normal — silent mode hides via WindowHide in startup()
 	err := wails.Run(&options.App{
 		Title:     "UPGO Node",
 		Width:     1280,
@@ -101,6 +100,7 @@ func runGUI(silent bool) {
 			Assets: frontend.Assets,
 		},
 		BackgroundColour: &options.RGBA{R: 20, G: 35, B: 52, A: 1},
+		StartHidden:      silent,
 		WindowStartState: options.Normal,
 		OnStartup:        app.startup,
 		OnShutdown:       app.shutdown,

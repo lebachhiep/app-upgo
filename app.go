@@ -115,14 +115,14 @@ func (a *App) startup(ctx context.Context) {
 		}
 
 		if a.silentMode {
-			// Wait for Wails message loop + WebView2 to initialize, then hide.
-			time.Sleep(500 * time.Millisecond)
-			runtime.WindowHide(a.ctx)
+			// Window was started hidden via StartHidden option — nothing to do.
+			log.Info().Msg("Silent mode: window hidden at launch")
 		} else {
 			// Cross-platform: use Wails runtime to get screen size, resize to 50%, center
 			a.centerAndResize50()
 			time.Sleep(300 * time.Millisecond)
 			a.centerAndResize50()
+			runtime.WindowShow(a.ctx)
 			log.Info().Msg("Window centered and resized to 50%")
 		}
 	}()
