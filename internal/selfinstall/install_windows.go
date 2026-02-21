@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 func installedExePath() string {
@@ -66,6 +67,7 @@ func CreateDesktopShortcut() error {
 		escPath(shortcutPath), escPath(exePath), escPath(filepath.Dir(exePath)), escPath(exePath),
 	)
 
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps)
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd.Run()
 }
