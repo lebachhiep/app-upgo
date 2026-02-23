@@ -54,7 +54,7 @@ func CheckHealth(proxyUrl string) Status {
 		}
 	}
 
-	// No scheme — auto-detect: try socks5, http, https
+	// No scheme — auto-detect: try socks5, http, https IN PARALLEL
 	tempURL := "socks5://" + raw
 	u, err := url.Parse(tempURL)
 	if err != nil {
@@ -65,28 +65,29 @@ func CheckHealth(proxyUrl string) Status {
 		hostWithAuth = u.User.String() + "@" + u.Host
 	}
 
-	// Try SOCKS5
-	result := checkSOCKS5Proxy(proxyUrl, u)
-	if result.Alive {
-		return result
+	type detectResult struct {
+		status   Status
+		priority int // lower = preferred (0=socks5, 1=http, 2=https)
+	}
+	ch := make(chan detectResult, 3)
+	go func() { ch <- detectResult{checkSOCKS5Proxy(proxyUrl, u), 0} }()
+	go func() { ch <- detectResult{checkHTTPProxy(proxyUrl, "http://"+hostWithAuth, "http"), 1} }()
+	go func() { ch <- detectResult{checkHTTPProxy(proxyUrl, "https://"+hostWithAuth, "https"), 2} }()
+
+	var best *detectResult
+	for i := 0; i < 3; i++ {
+		r := <-ch
+		if r.status.Alive {
+			if best == nil || r.priority < best.priority {
+				best = &r
+			}
+		}
+	}
+	if best != nil {
+		return best.status
 	}
 
-	// Try HTTP
-	httpURL := "http://" + hostWithAuth
-	httpResult := checkHTTPProxy(proxyUrl, httpURL, "http")
-	if httpResult.Alive {
-		return httpResult
-	}
-
-	// Try HTTPS
-	httpsURL := "https://" + hostWithAuth
-	httpsResult := checkHTTPProxy(proxyUrl, httpsURL, "https")
-	if httpsResult.Alive {
-		return httpsResult
-	}
-
-	// All failed
-	return Status{URL: proxyUrl, Error: "all protocols failed (socks5/http/https)", Latency: result.Latency}
+	return Status{URL: proxyUrl, Error: "all protocols failed (socks5/http/https)"}
 }
 
 // checkHTTPProxy tests an HTTP/HTTPS proxy by making a request through it.
@@ -99,7 +100,7 @@ func checkHTTPProxy(originalUrl, normalized, protocol string) Status {
 		return result
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	transport := &http.Transport{
@@ -109,11 +110,11 @@ func checkHTTPProxy(originalUrl, normalized, protocol string) Status {
 	}
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   10 * time.Second,
+		Timeout:   5 * time.Second,
 	}
 	defer client.CloseIdleConnections()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", "http://httpbin.org/ip", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://www.gstatic.com/generate_204", nil)
 	if err != nil {
 		result.Error = fmt.Sprintf("request error: %v", err)
 		return result
@@ -130,7 +131,7 @@ func checkHTTPProxy(originalUrl, normalized, protocol string) Status {
 	}
 	resp.Body.Close()
 
-	result.Alive = resp.StatusCode >= 200 && resp.StatusCode < 400
+	result.Alive = resp.StatusCode >= 200 && resp.StatusCode < 500
 	result.Latency = elapsed
 	if !result.Alive {
 		result.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
@@ -156,10 +157,10 @@ func checkSOCKS5Proxy(originalUrl string, u *url.URL) Status {
 		host = host + ":1080"
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	netDialer := &net.Dialer{Timeout: 10 * time.Second}
+	netDialer := &net.Dialer{Timeout: 5 * time.Second}
 	dialer, err := proxy.SOCKS5("tcp", host, auth, netDialer)
 	if err != nil {
 		result.Error = fmt.Sprintf("dialer error: %v", err)
@@ -181,7 +182,7 @@ func checkSOCKS5Proxy(originalUrl string, u *url.URL) Status {
 	case <-ctx.Done():
 		elapsed := time.Since(start).Milliseconds()
 		result.Latency = elapsed
-		result.Error = "timeout after 10s"
+		result.Error = "timeout after 5s"
 		// Clean up the goroutine's connection when it eventually completes
 		go func() {
 			if dr := <-ch; dr.conn != nil {

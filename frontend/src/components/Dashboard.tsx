@@ -19,10 +19,18 @@ import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianG
 import { AppService, RuntimeService } from '@/services/wails'
 import type { RelayStats, RelayStatus, ProxyStatus, ExitPoint } from '@/types'
 
+interface ConnectProgress {
+  step: string
+  detail: string
+  percent: number
+  elapsed: number
+}
+
 interface DashboardProps {
   status: RelayStatus | null
   stats: RelayStats | null
   isRunning: boolean
+  isConnected: boolean
   libStatus?: { status: string; detail: string } | null
   onStart: (partnerId?: string) => void
   onStop: () => void
@@ -30,6 +38,7 @@ interface DashboardProps {
   proxyStatuses?: ProxyStatus[]
   partnerId: string
   onPartnerIdChange: (id: string) => void
+  connectProgress?: ConnectProgress | null
 }
 
 interface ChartPoint { time: string; sent: number; recv: number }
@@ -44,13 +53,34 @@ const initChart = (): ChartPoint[] => {
   })
 }
 
-function Dashboard({ status, stats, isRunning, libStatus, onStart, onStop, hasPartnerId, proxyStatuses, partnerId, onPartnerIdChange }: DashboardProps) {
+function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, onStop, hasPartnerId, proxyStatuses, partnerId, onPartnerIdChange, connectProgress }: DashboardProps) {
   const [chartData, setChartData] = useState<ChartPoint[]>(initChart)
   const prevStatsRef = useRef<{ sent: number; recv: number } | null>(null)
   const [localProxies, setLocalProxies] = useState<ProxyStatus[]>([])
   const [checkingIdx, setCheckingIdx] = useState<Set<number>>(new Set())
   const [checkingAll, setCheckingAll] = useState(false)
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000))
+  const [progressElapsed, setProgressElapsed] = useState(0)
+  const progressStartRef = useRef<number | null>(null)
+
+  // Track elapsed time on frontend — runs every second while progress panel is visible
+  useEffect(() => {
+    if (connectProgress && isRunning && !isConnected) {
+      if (progressStartRef.current === null) {
+        progressStartRef.current = Date.now() / 1000 - (connectProgress.elapsed || 0)
+      }
+      setProgressElapsed(Math.floor(Date.now() / 1000 - progressStartRef.current))
+      const timer = setInterval(() => {
+        if (progressStartRef.current !== null) {
+          setProgressElapsed(Math.floor(Date.now() / 1000 - progressStartRef.current))
+        }
+      }, 1000)
+      return () => clearInterval(timer)
+    } else {
+      progressStartRef.current = null
+      setProgressElapsed(0)
+    }
+  }, [connectProgress, isRunning, isConnected])
   const [showAddModal, setShowAddModal] = useState(false)
   const [proxyText, setProxyText] = useState('')
   const [launchOnStartup, setLaunchOnStartup] = useState(false)
@@ -226,6 +256,7 @@ function Dashboard({ status, stats, isRunning, libStatus, onStart, onStop, hasPa
   }, [stats?.node_addresses_json])
 
   const directExit = exitPoints.find(ep => ep.type === 'direct')
+  const totalExitCount = exitPoints.length
 
   // Map proxy host IP → exit point for inline display in proxy rows
   const proxyExitMap = useMemo(() => {
@@ -289,6 +320,63 @@ function Dashboard({ status, stats, isRunning, libStatus, onStart, onStop, hasPa
         </div>
       </div>
 
+      {/* Connection progress panel */}
+      {connectProgress && isRunning && !isConnected && (
+        <div style={{
+          background: '#1E2D3E',
+          borderRadius: 8,
+          border: '1px solid #1E344E',
+          padding: '8px 12px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {connectProgress.step === 'connected' ? (
+                <CheckCircleOutlined style={{ color: '#52c41a', fontSize: 13 }} />
+              ) : connectProgress.step === 'error' ? (
+                <WarningOutlined style={{ color: '#ff4d4f', fontSize: 13 }} />
+              ) : (
+                <LoadingOutlined spin style={{ color: '#22edeb', fontSize: 13 }} />
+              )}
+              <span style={{ fontSize: 11, color: '#e0e0f0', fontWeight: 500 }}>
+                {connectProgress.step === 'checking_proxies' && 'Checking Proxies'}
+                {connectProgress.step === 'proxies_ready' && 'Proxies Ready'}
+                {connectProgress.step === 'initializing' && 'Initializing'}
+                {connectProgress.step === 'connecting' && 'Connecting'}
+                {connectProgress.step === 'detecting_exits' && 'Detecting Exit Points'}
+                {connectProgress.step === 'reconnecting' && 'Reconnecting'}
+                {connectProgress.step === 'connected' && 'Connected'}
+                {connectProgress.step === 'error' && 'Error'}
+                {connectProgress.step === 'cancelled' && 'Cancelled'}
+              </span>
+            </div>
+            <span style={{ fontSize: 10, color: '#8B97A7', fontFamily: 'monospace' }}>
+              {progressElapsed > 0 && `${Math.floor(progressElapsed / 60)}:${(progressElapsed % 60).toString().padStart(2, '0')}`}
+            </span>
+          </div>
+          <div style={{ fontSize: 10, color: '#8B97A7' }}>{connectProgress.detail}</div>
+          {/* Progress bar */}
+          <div style={{ height: 3, background: '#111D2D', borderRadius: 2, overflow: 'hidden', position: 'relative' }}>
+            <div style={{
+              height: '100%',
+              width: `${connectProgress.percent}%`,
+              background: connectProgress.step === 'error' ? '#ff4d4f' : connectProgress.step === 'connected' ? '#52c41a' : '#22edeb',
+              borderRadius: 2,
+              transition: 'width 0.5s ease, background 0.3s ease',
+            }} />
+            {(connectProgress.step === 'connecting' || connectProgress.step === 'detecting_exits' || connectProgress.step === 'reconnecting') && (
+              <div style={{
+                position: 'absolute', top: 0, left: 0, right: 0, height: '100%',
+                background: 'linear-gradient(90deg, transparent 0%, rgba(34,237,235,0.3) 50%, transparent 100%)',
+                animation: 'progressShimmer 1.5s ease-in-out infinite',
+              }} />
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Stat cards */}
       <Row gutter={[8, 8]}>
         <Col xs={12} sm={6}>
@@ -309,7 +397,7 @@ function Dashboard({ status, stats, isRunning, libStatus, onStart, onStop, hasPa
           <Card size="small" style={CARD} bodyStyle={{ padding: '8px 10px' }}>
             <div style={st.statLabel}><CloudServerOutlined style={st.statIcon} /><span>Nodes</span></div>
             <div style={st.statValue} title={nodeAddresses.length > 0 ? nodeAddresses.join(', ') : undefined}>{stats?.connected_nodes ?? 0}</div>
-            <div style={st.statSub}>{stats?.active_streams ?? 0} streams &middot; {exitPoints.length} exits</div>
+            <div style={st.statSub}>{stats?.active_streams ?? 0} streams &middot; {totalExitCount} exits</div>
           </Card>
         </Col>
         <Col xs={12} sm={6}>
@@ -385,8 +473,8 @@ function Dashboard({ status, stats, isRunning, libStatus, onStart, onStop, hasPa
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '5px 10px', borderBottom: '1px solid #1E344E', flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ color: '#8B97A7', fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Exit Points</span>
-            {isRunning && exitPoints.length > 0 && (
-              <Tag style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }} color="cyan">{exitPoints.length} exits</Tag>
+            {isRunning && totalExitCount > 0 && (
+              <Tag style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }} color="cyan">{totalExitCount} exits</Tag>
             )}
             <Tag style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }} color="success">{aliveCount} proxy</Tag>
             <Tag style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }} color="error">{localProxies.filter(p => !p.alive && p.error !== 'checking').length} dead</Tag>
@@ -441,7 +529,7 @@ function Dashboard({ status, stats, isRunning, libStatus, onStart, onStop, hasPa
           {/* Proxy rows */}
           {localProxies.map((ps, i) => {
             const isChecking = ps.error === 'checking' || checkingIdx.has(i)
-            const upSec = isRunning && ps.alive && ps.since > 0 ? Math.max(0, now - ps.since) : 0
+            const upSec = isRunning && isConnected && ps.alive && ps.since > 0 ? Math.max(0, now - ps.since) : 0
             const pColor = ps.protocol === 'socks5' ? '#a78bfa' : ps.protocol === 'https' ? '#22edeb' : ps.protocol === 'http' ? '#faad14' : '#8B97A7'
             const matchedExit = proxyExitMap.get(getProxyHost(ps.url))
 
@@ -498,7 +586,7 @@ function Dashboard({ status, stats, isRunning, libStatus, onStart, onStop, hasPa
           <span style={{ width: 46 }}>
             <Tag style={{ margin: 0, fontSize: 7, lineHeight: '12px', padding: '0 3px', color: '#e0e0f0', borderColor: '#e0e0f044', background: '#e0e0f011' }}>TOTAL</Tag>
           </span>
-          <span style={{ flex: 1, fontFamily: 'monospace', color: '#8B97A7' }}>{isRunning ? (`${exitPoints.length} exit${exitPoints.length !== 1 ? 's' : ''}` + (aliveCount > 0 ? ` · ${aliveCount} proxy` : ' · direct')) : '—'}</span>
+          <span style={{ flex: 1, fontFamily: 'monospace', color: '#8B97A7' }}>{isRunning ? (`${totalExitCount} exit${totalExitCount !== 1 ? 's' : ''}` + (aliveCount > 0 ? ` · ${aliveCount} proxy` : ' · direct')) : '—'}</span>
           <span style={{ width: 44 }}></span>
           <span style={{ width: 60, textAlign: 'right', fontFamily: 'monospace', color: '#22edeb' }}>{fmtUptime(stats?.uptime ?? 0)}</span>
           <span style={{ width: 52, textAlign: 'right', fontFamily: 'monospace', color: '#e0e0f0', fontWeight: 600 }}>{fmtBytes(stats?.bytes_sent ?? 0)}</span>

@@ -93,6 +93,7 @@ jobs:
       - name: Build
         run: |
           VERSION=${GITHUB_REF_NAME:-dev}
+          export APP_VERSION=$VERSION
 
           # Set cross-compile env for Linux arm64
           if [[ "${{ matrix.platform }}" == "linux/arm64" ]]; then

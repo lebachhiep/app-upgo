@@ -4,6 +4,9 @@ import path from 'path'
 
 export default defineConfig({
   plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(process.env.APP_VERSION || '1.0.0'),
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -12,5 +15,6 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    sourcemap: 'hidden',
   },
 })

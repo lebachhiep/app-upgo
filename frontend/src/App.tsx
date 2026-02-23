@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import * as Sentry from '@sentry/react'
 import { ConfigProvider, Modal, Input, Button, Space } from 'antd'
 import { darkTheme } from './theme'
 import { AppService, RuntimeService } from './services/wails'
@@ -26,6 +27,8 @@ function App() {
   const [zoom, setZoom] = useState(1.0)
   const [libStatus, setLibStatus] = useState<{ status: string; detail: string } | null>(null)
   const [proxyStatuses, setProxyStatuses] = useState<ProxyStatus[]>([])
+  const [hasNetwork, setHasNetwork] = useState(true)
+  const [connectProgress, setConnectProgress] = useState<{ step: string; detail: string; percent: number; elapsed: number } | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const zoomRef = useRef(1.0)
 
@@ -76,7 +79,7 @@ function App() {
       const running = await AppService.IsRelayRunning()
       // Don't override isRunning=true while relay is starting (proxy checks take time)
       if (running !== undefined && !startingRef.current) setIsRunning(running)
-    } catch { /* */ }
+    } catch { /* transient polling error */ }
   }, [])
 
   // Load saved config (partner ID + initial proxy list)
@@ -93,7 +96,7 @@ function App() {
             })))
           }
         }
-      } catch { /* */ }
+      } catch (err) { Sentry.captureException(err) }
     }
     loadConfig()
   }, [])
@@ -105,12 +108,13 @@ function App() {
 
     const onStarted = RuntimeService.EventsOn('relay:started', () => {
       startingRef.current = false
+      setHasNetwork(true)
       setIsRunning(true); fetchStatus()
     })
     if (onStarted) cleanups.push(onStarted)
 
     const onStopped = RuntimeService.EventsOn('relay:stopped', () => {
-      setIsRunning(false); setIsConnected(false); setLiveStats(null)
+      setIsRunning(false); setIsConnected(false); setLiveStats(null); setConnectProgress(null)
       setProxyStatuses(prev => prev.map(ps => ({ ...ps, bytes_sent: 0, bytes_recv: 0, since: 0 })))
       fetchStatus()
     })
@@ -159,6 +163,24 @@ function App() {
     })
     if (onProxyStatus) cleanups.push(onProxyStatus)
 
+    const onNetwork = RuntimeService.EventsOn('network:status', (d: unknown) => {
+      const online = d as boolean
+      setHasNetwork(online)
+    })
+    if (onNetwork) cleanups.push(onNetwork)
+
+    const onProgress = RuntimeService.EventsOn('relay:progress', (d: unknown) => {
+      const p = d as { step: string; detail: string; percent: number; elapsed: number }
+      if (p) {
+        setConnectProgress(p)
+        // Auto-clear after connected
+        if (p.step === 'connected') {
+          setTimeout(() => setConnectProgress(null), 3000)
+        }
+      }
+    })
+    if (onProgress) cleanups.push(onProgress)
+
     // Sync proxy list changes from Settings → Dashboard
     const onProxiesUpdated = RuntimeService.EventsOn('proxies:updated', (d: unknown) => {
       const proxies = d as string[]
@@ -197,6 +219,7 @@ function App() {
         if (overridePartnerId) setSavedPartnerId(overridePartnerId)
       } catch (err) {
         console.error('Start failed:', err)
+        Sentry.captureException(err)
         setIsRunning(false)
       } finally {
         startingRef.current = false
@@ -219,6 +242,7 @@ function App() {
       setStartPartnerId('')
     } catch (err) {
       console.error('Start failed:', err)
+      Sentry.captureException(err)
       setIsRunning(false)
     } finally {
       startingRef.current = false
@@ -226,7 +250,7 @@ function App() {
   }
 
   const handleStop = async () => {
-    try { await AppService.StopRelay() } catch { /* */ }
+    try { await AppService.StopRelay() } catch (err) { Sentry.captureException(err) }
   }
 
   return (
@@ -240,6 +264,7 @@ function App() {
           onZoomReset={handleZoomReset}
           isConnected={isConnected}
           isRunning={isRunning}
+          hasNetwork={hasNetwork}
         />
 
         {/* Zoomed content area — titlebar stays unzoomed */}
@@ -252,7 +277,7 @@ function App() {
           height: `calc((100vh - ${TITLEBAR_HEIGHT}px) / ${zoom})`,
         }}>
           <div style={{ height: '100%', overflow: 'hidden', padding: '12px 14px', background: '#142334' }}>
-            <Dashboard status={status} stats={liveStats} isRunning={isRunning} libStatus={libStatus} onStart={handleStart} onStop={handleStop} hasPartnerId={!!savedPartnerId} proxyStatuses={proxyStatuses} partnerId={savedPartnerId} onPartnerIdChange={setSavedPartnerId} />
+            <Dashboard status={status} stats={liveStats} isRunning={isRunning} isConnected={isConnected} libStatus={libStatus} onStart={handleStart} onStop={handleStop} hasPartnerId={!!savedPartnerId} proxyStatuses={proxyStatuses} partnerId={savedPartnerId} onPartnerIdChange={setSavedPartnerId} connectProgress={connectProgress} />
           </div>
         </div>
 

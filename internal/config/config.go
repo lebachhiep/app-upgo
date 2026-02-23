@@ -40,6 +40,7 @@ func Get() *viper.Viper {
 		instance.SetDefault("auto_start", true)
 		instance.SetDefault("launch_on_startup", true)
 		instance.SetDefault("log_level", "info")
+		instance.SetDefault("api_url", "")
 
 		configFile := filepath.Join(configDir, "config.yaml")
 		if _, err := os.Stat(configFile); os.IsNotExist(err) {

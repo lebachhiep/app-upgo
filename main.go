@@ -3,7 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
+	"github.com/getsentry/sentry-go"
+	"github.com/rs/zerolog/log"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -15,12 +18,33 @@ import (
 	"relay-app/internal/cli"
 	"relay-app/internal/config"
 	"relay-app/internal/selfinstall"
+	"relay-app/internal/sentryhook"
 	"relay-app/internal/singleinstance"
 )
+
+const sentryDSN = "https://d7c05d7c2df2350ae859ed1b968dfaf0@o4510921798451200.ingest.de.sentry.io/4510934455812176"
 
 var version = "1.0.0"
 
 func main() {
+	// Initialize Sentry
+	env := "production"
+	if version == "1.0.0" || version == "dev" {
+		env = "development"
+	}
+	if err := sentry.Init(sentry.ClientOptions{
+		Dsn:         sentryDSN,
+		Release:     "app-upgo@" + version,
+		Environment: env,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "sentry.Init: %s\n", err)
+	}
+	defer sentry.Flush(3 * time.Second)
+	defer sentry.Recover()
+
+	// Attach Sentry hook to zerolog
+	log.Logger = log.Logger.Hook(sentryhook.Hook{})
+
 	// Extract --silent flag before routing to CLI or GUI
 	silent := false
 	isBindings := false

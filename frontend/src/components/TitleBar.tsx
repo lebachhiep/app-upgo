@@ -10,9 +10,10 @@ interface TitleBarProps {
   onZoomReset: () => void
   isConnected?: boolean
   isRunning?: boolean
+  hasNetwork?: boolean
 }
 
-function TitleBar({ deviceId, zoom, onZoomIn, onZoomOut, onZoomReset, isConnected, isRunning }: TitleBarProps) {
+function TitleBar({ deviceId, zoom, onZoomIn, onZoomOut, onZoomReset, isConnected, isRunning, hasNetwork = true }: TitleBarProps) {
   const [copied, setCopied] = useState(false)
 
   const handleClose = useCallback(() => {
@@ -36,9 +37,9 @@ function TitleBar({ deviceId, zoom, onZoomIn, onZoomOut, onZoomReset, isConnecte
       <div style={styles.left}>
         <div style={styles.brand}>
           <span style={styles.title}>UPGO.IO</span>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10, color: isConnected ? '#60B966' : isRunning ? '#FDC11C' : '#DD523C' }}>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: isConnected ? '#60B966' : isRunning ? '#FDC11C' : '#DD523C' }} />
-            {isConnected ? 'Connected' : isRunning ? 'Connecting' : 'Offline'}
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10, color: isConnected ? '#60B966' : !hasNetwork ? '#DD523C' : isRunning ? '#FDC11C' : '#DD523C' }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: isConnected ? '#60B966' : !hasNetwork ? '#DD523C' : isRunning ? '#FDC11C' : '#DD523C', animation: !hasNetwork && isRunning ? 'pulse 1.5s infinite' : undefined }} />
+            {isConnected ? 'Connected' : !hasNetwork && isRunning ? 'No Network' : isRunning ? 'Connecting' : 'Offline'}
           </span>
           {deviceId && (
             <span className="titlebar-nodrag" style={styles.deviceId} title={`Click to copy: ${deviceId}`}>

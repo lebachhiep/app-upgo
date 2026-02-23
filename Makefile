@@ -1,6 +1,7 @@
 APP_NAME    := upgo-node
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo "1.0.0")
 LDFLAGS     := -s -w -X main.version=$(VERSION)
+export APP_VERSION := $(VERSION)
 
 .PHONY: dev build build-windows-x64 build-windows-x86 build-linux-amd64 build-linux-arm64 build-darwin clean frontend-install frontend-build test download-libs-clean
 

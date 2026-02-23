@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/rs/zerolog/log"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -78,6 +79,7 @@ func (a *App) startup(ctx context.Context) {
 
 	// Ensure autostart + desktop shortcut on every startup
 	go func() {
+		defer sentry.Recover()
 		cfg := config.Get()
 		if !cfg.GetBool("autostart_initialized") {
 			// First run — enable autostart by default
@@ -108,6 +110,7 @@ func (a *App) startup(ctx context.Context) {
 	// Ensure relay library is ready at startup (download if hash mismatch)
 	// Then auto-start relay if configured
 	go func() {
+		defer sentry.Recover()
 		time.Sleep(500 * time.Millisecond)
 		a.manager.EnsureLibrary()
 
@@ -122,6 +125,7 @@ func (a *App) startup(ctx context.Context) {
 
 	// Constrain window to screen, then set initial state
 	go func() {
+		defer sentry.Recover()
 		// Install WM_GETMINMAXINFO handler first (retry until window is ready)
 		for i := 0; i < 10; i++ {
 			time.Sleep(100 * time.Millisecond)
@@ -150,6 +154,7 @@ func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 	if !a.isRelayRunning() && !a.userStopped.Load() {
 		cfg := config.Get()
 		go func() {
+			defer sentry.Recover()
 			if err := a.StartRelay(cfg.GetString("partner_id")); err != nil {
 				log.Error().Err(err).Msg("Auto-start relay on close failed")
 			}
@@ -170,6 +175,7 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.manager != nil {
 		a.manager.Close()
 	}
+	// sentry.Flush handled by defer in main()
 }
 
 func (a *App) addLog(msg string) {
@@ -985,6 +991,7 @@ func (a *App) CloseWindow() {
 	if !a.isRelayRunning() && !a.userStopped.Load() {
 		cfg := config.Get()
 		go func() {
+			defer sentry.Recover()
 			if err := a.StartRelay(cfg.GetString("partner_id")); err != nil {
 				log.Error().Err(err).Msg("Auto-start relay on close failed")
 			}
