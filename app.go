@@ -513,13 +513,16 @@ func (a *App) StopRelay() error {
 		a.retryCancel = nil
 	}
 
-	// Emit stopped event BEFORE the lock so UI never freezes
+	// Emit stopped event immediately so UI updates instantly
 	runtime.EventsEmit(a.ctx, "relay:stopped", true)
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	// DLL teardown runs in background — return immediately to avoid blocking UI thread
+	go func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		a.stopRelay()
+	}()
 
-	a.stopRelay()
 	return nil
 }
 

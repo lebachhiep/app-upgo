@@ -249,8 +249,9 @@ function App() {
     }
   }
 
-  const handleStop = async () => {
-    try { await AppService.StopRelay() } catch (err) { Sentry.captureException(err) }
+  const handleStop = () => {
+    // Fire-and-forget — UI state is driven by relay:stopped event, not by awaiting
+    AppService.StopRelay().catch(err => Sentry.captureException(err))
   }
 
   return (
