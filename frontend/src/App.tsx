@@ -16,6 +16,7 @@ const TITLEBAR_HEIGHT = 32
 function App() {
   const [isRunning, setIsRunning] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
+  const [isStopping, setIsStopping] = useState(false)
   const startingRef = useRef(false)
   const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const rawConnectedRef = useRef(false)
@@ -114,7 +115,7 @@ function App() {
     if (onStarted) cleanups.push(onStarted)
 
     const onStopped = RuntimeService.EventsOn('relay:stopped', () => {
-      setIsRunning(false); setIsConnected(false); setLiveStats(null); setConnectProgress(null)
+      setIsStopping(false); setIsRunning(false); setIsConnected(false); setLiveStats(null); setConnectProgress(null)
       setProxyStatuses(prev => prev.map(ps => ({ ...ps, bytes_sent: 0, bytes_recv: 0, since: 0 })))
       fetchStatus()
     })
@@ -250,8 +251,9 @@ function App() {
   }
 
   const handleStop = () => {
-    // Fire-and-forget — UI state is driven by relay:stopped event, not by awaiting
-    AppService.StopRelay().catch(err => Sentry.captureException(err))
+    setIsStopping(true)
+    // Fire-and-forget — UI state is driven by relay:stopped event
+    AppService.StopRelay().catch(err => { Sentry.captureException(err); setIsStopping(false) })
   }
 
   return (
@@ -278,7 +280,7 @@ function App() {
           height: `calc((100vh - ${TITLEBAR_HEIGHT}px) / ${zoom})`,
         }}>
           <div style={{ height: '100%', overflow: 'hidden', padding: '12px 14px', background: '#142334' }}>
-            <Dashboard status={status} stats={liveStats} isRunning={isRunning} isConnected={isConnected} libStatus={libStatus} onStart={handleStart} onStop={handleStop} hasPartnerId={!!savedPartnerId} proxyStatuses={proxyStatuses} partnerId={savedPartnerId} onPartnerIdChange={setSavedPartnerId} connectProgress={connectProgress} />
+            <Dashboard status={status} stats={liveStats} isRunning={isRunning} isConnected={isConnected} isStopping={isStopping} libStatus={libStatus} onStart={handleStart} onStop={handleStop} hasPartnerId={!!savedPartnerId} proxyStatuses={proxyStatuses} partnerId={savedPartnerId} onPartnerIdChange={setSavedPartnerId} connectProgress={connectProgress} />
           </div>
         </div>
 

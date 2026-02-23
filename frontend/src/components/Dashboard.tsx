@@ -31,6 +31,7 @@ interface DashboardProps {
   stats: RelayStats | null
   isRunning: boolean
   isConnected: boolean
+  isStopping?: boolean
   libStatus?: { status: string; detail: string } | null
   onStart: (partnerId?: string) => void
   onStop: () => void
@@ -53,7 +54,7 @@ const initChart = (): ChartPoint[] => {
   })
 }
 
-function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, onStop, hasPartnerId, proxyStatuses, partnerId, onPartnerIdChange, connectProgress }: DashboardProps) {
+function Dashboard({ status, stats, isRunning, isConnected, isStopping, libStatus, onStart, onStop, hasPartnerId, proxyStatuses, partnerId, onPartnerIdChange, connectProgress }: DashboardProps) {
   const [chartData, setChartData] = useState<ChartPoint[]>(initChart)
   const prevStatsRef = useRef<{ sent: number; recv: number } | null>(null)
   const [localProxies, setLocalProxies] = useState<ProxyStatus[]>([])
@@ -303,7 +304,7 @@ function Dashboard({ status, stats, isRunning, isConnected, libStatus, onStart, 
             </div>
           )}
           {isRunning ? (
-            <Button size="small" danger icon={<PoweroffOutlined />} onClick={onStop} style={{ borderRadius: 6, fontSize: 12, height: 24 }}>Stop</Button>
+            <Button size="small" danger icon={isStopping ? <LoadingOutlined spin /> : <PoweroffOutlined />} onClick={onStop} disabled={isStopping} loading={isStopping} style={{ borderRadius: 6, fontSize: 12, height: 24 }}>{isStopping ? 'Stopping...' : 'Stop'}</Button>
           ) : (
             <Button size="small" type="primary" icon={<CaretRightOutlined />} onClick={() => { if (editingPid && pidDraft.trim()) { handlePidSave(); onStart(pidDraft.trim()) } else if (hasPartnerId) { onStart() } else if (pidDraft.trim()) { handlePidSave(); onStart(pidDraft.trim()) } }} disabled={!hasPartnerId && !pidDraft.trim()} style={{ borderRadius: 6, fontSize: 12, height: 24 }}>Start</Button>
           )}
