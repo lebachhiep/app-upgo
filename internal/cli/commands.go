@@ -116,7 +116,7 @@ func newStartCmd() *cobra.Command {
 				}
 			}
 
-			// ── Create SINGLE SDK client with all proxies ──
+			// ── Create parallel SDK clients (proxies split into batches) ──
 			mgr := relay.NewRelayManager()
 			mgr.OnLog = func(msg string) {
 				if isVerbose {
@@ -178,7 +178,7 @@ func newStartCmd() *cobra.Command {
 				return fmt.Errorf("failed to start node: %w", err)
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "\nNode started with partner ID: %s (direct + %d proxies, single client)\n", partnerId, addedCount)
+			fmt.Fprintf(cmd.OutOrStdout(), "\nNode started with partner ID: %s (direct + %d proxies, parallel batches)\n", partnerId, addedCount)
 
 			if daemon || !isTerminal() {
 				fmt.Fprintln(cmd.OutOrStdout(), "Running in daemon mode...")

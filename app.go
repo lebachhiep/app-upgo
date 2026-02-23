@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,16 +28,30 @@ type App struct {
 	ctx           context.Context
 	version       string
 	manager       *relay.RelayManager // control manager (EnsureLibrary only, never Started)
-	relayMgr      *relay.RelayManager // single SDK client with all proxies
+	relayMgr      *relay.RelayManager // parallel SDK clients (proxies batched)
 	relayMu       sync.RWMutex
 	relayStarting bool                        // true while StartRelay is in progress
-	lastStats     atomic.Pointer[relay.Stats] // latest stats from single client
+	lastStats     atomic.Pointer[relay.Stats] // latest aggregated stats from all clients
 	mu            sync.RWMutex
 	logs          []string
 	logMu         sync.RWMutex
 	silentMode    bool
 	proxyStatuses []proxy.Status
 	proxyStatusMu sync.RWMutex
+	userStopped     atomic.Bool        // true when user explicitly stopped — blocks watchdog/auto-restart
+	startCancel     context.CancelFunc // cancel in-progress StartRelay (health checks)
+	retryCancel     context.CancelFunc // cancel dead proxy retry goroutine
+	lastFullRestart time.Time          // throttles OnNeedRestart escalations
+	exitPointsMu       sync.Mutex
+	seenExitPoints     map[string]seenEP // all ever-seen exit points (keyed by ip_address)
+	detectionStartTime time.Time         // when SDK start began (for measuring detection time)
+	detectionLogged    bool              // true after first detection time log
+}
+
+type seenEP struct {
+	Type     string `json:"Type"`
+	Country  string `json:"Country"`
+	LastSeen int64  `json:"LastSeen,omitempty"` // unix timestamp — prune entries older than 7 days
 }
 
 func NewApp() *App {
@@ -129,8 +146,8 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) beforeClose(ctx context.Context) (prevent bool) {
-	// If relay not running, start it before hiding
-	if !a.isRelayRunning() {
+	// If relay not running and user didn't explicitly stop, start it before hiding
+	if !a.isRelayRunning() && !a.userStopped.Load() {
 		cfg := config.Get()
 		go func() {
 			if err := a.StartRelay(cfg.GetString("partner_id")); err != nil {
@@ -165,8 +182,19 @@ func (a *App) addLog(msg string) {
 }
 
 func (a *App) StartRelay(partnerId string) error {
+	// Clear userStopped — this is a deliberate start
+	a.userStopped.Store(false)
+	// Load historical exit points for local UI display.
+	a.loadSeenExitPoints()
+
+	// Cancel any previous in-progress StartRelay — brief lock only
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	if a.startCancel != nil {
+		a.startCancel()
+	}
+	startCtx, startCancel := context.WithCancel(context.Background())
+	a.startCancel = startCancel
+	a.mu.Unlock() // Release BEFORE health checks so StopRelay is never blocked
 
 	// Mark as starting so isRelayRunning() returns true during proxy checks
 	a.relayMu.Lock()
@@ -182,11 +210,24 @@ func (a *App) StartRelay(partnerId string) error {
 	verbose := cfg.GetBool("verbose")
 	discoveryUrl := cfg.GetString("discovery_url")
 
-	// Check all proxies before starting — emit status events for UI
+	// ── Health checks run WITHOUT holding a.mu — StopRelay can proceed instantly ──
 	proxies := cfg.GetStringSlice("proxies")
 	var allStatuses []proxy.Status
+	startTime := time.Now()
+
+	// Progress helper
+	emitProgress := func(step string, detail string, pct int) {
+		runtime.EventsEmit(a.ctx, "relay:progress", map[string]interface{}{
+			"step":    step,
+			"detail":  detail,
+			"percent": pct,
+			"elapsed": int(time.Since(startTime).Seconds()),
+		})
+	}
 
 	if len(proxies) > 0 {
+		emitProgress("checking_proxies", fmt.Sprintf("Checking %d proxies...", len(proxies)), 5)
+
 		allStatuses = make([]proxy.Status, len(proxies))
 		for i, p := range proxies {
 			allStatuses[i] = proxy.Status{URL: p, Error: "checking"}
@@ -194,6 +235,7 @@ func (a *App) StartRelay(partnerId string) error {
 		runtime.EventsEmit(a.ctx, "proxy:status", allStatuses)
 
 		// Check in parallel — auto-detects protocol
+		var checked int64
 		var wg sync.WaitGroup
 		for i, p := range proxies {
 			wg.Add(1)
@@ -201,18 +243,66 @@ func (a *App) StartRelay(partnerId string) error {
 				defer wg.Done()
 				allStatuses[idx] = proxy.CheckHealth(proxyUrl)
 				runtime.EventsEmit(a.ctx, "proxy:status", allStatuses)
+				n := atomic.AddInt64(&checked, 1)
+				alive := 0
+				for _, s := range allStatuses {
+					if s.Alive {
+						alive++
+					}
+				}
+				pct := 5 + int(n*20/int64(len(proxies)))
+				emitProgress("checking_proxies", fmt.Sprintf("Checked %d/%d proxies (%d alive)", n, len(proxies), alive), pct)
 			}(i, p)
 		}
 		wg.Wait()
 
+		// Bail out if user stopped during health checks
+		if startCtx.Err() != nil || a.userStopped.Load() {
+			emitProgress("cancelled", "Cancelled by user", 0)
+			return fmt.Errorf("start cancelled")
+		}
+
+		aliveCount := 0
 		now := time.Now().Unix()
 		for i, ps := range allStatuses {
 			if ps.Alive {
 				allStatuses[i].Since = now
+				aliveCount++
 			} else {
 				log.Warn().Str("proxy", ps.URL).Str("error", ps.Error).Msg("Proxy dead, skipping")
 			}
 		}
+
+		deadCount := len(proxies) - aliveCount
+		log.Warn().Int("alive", aliveCount).Int("dead", deadCount).Int("total", len(proxies)).Msg("HEALTH CHECK RESULT")
+		emitProgress("proxies_ready", fmt.Sprintf("%d/%d proxies alive", aliveCount, len(proxies)), 25)
+
+		// Add dead proxies to seenExitPoints as offline so they show on the web.
+		// We use the proxy IP as the exit IP (real exit IP is unknown for dead proxies).
+		a.exitPointsMu.Lock()
+		for _, ps := range allStatuses {
+			if ps.Alive {
+				continue
+			}
+			proxyIP := extractProxyIP(ps.URL)
+			if proxyIP == "" {
+				log.Warn().Str("url", ps.URL).Msg("dead proxy: extractProxyIP returned empty")
+				continue
+			}
+			proto := ps.Protocol
+			if proto == "" {
+				proto = "http"
+			}
+			a.seenExitPoints[proxyIP] = seenEP{
+				Type:     proto,
+				Country:  "",
+				LastSeen: now,
+			}
+			log.Warn().Str("ip", proxyIP).Str("proto", proto).Msg("dead proxy added as offline exit")
+		}
+		deadAdded := len(a.seenExitPoints)
+		a.exitPointsMu.Unlock()
+		log.Warn().Int("dead_exits_added", deadAdded).Msg("seenExitPoints after dead proxies")
 
 		// Persist statuses for dashboard
 		a.proxyStatusMu.Lock()
@@ -221,7 +311,16 @@ func (a *App) StartRelay(partnerId string) error {
 		runtime.EventsEmit(a.ctx, "proxy:status", allStatuses)
 	}
 
-	// Create SINGLE SDK client with all proxies
+	// ── Acquire lock for relay creation/start phase (fast) ──
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Double-check cancellation after re-acquiring lock
+	if startCtx.Err() != nil || a.userStopped.Load() {
+		return fmt.Errorf("start cancelled")
+	}
+
+	// Create parallel SDK clients (proxies batched internally)
 	mgr := relay.NewRelayManager()
 	mgr.OnLog = func(msg string) {
 		a.addLog(msg)
@@ -230,24 +329,75 @@ func (a *App) StartRelay(partnerId string) error {
 	mgr.OnStatsUpdate = func(stats *relay.Stats) {
 		a.lastStats.Store(stats)
 		runtime.EventsEmit(a.ctx, "stats:update", stats)
+		// Emit exit detection progress while not yet connected
+		if stats.ExitPointsJSON != "" && stats.ExitPointsJSON != "[]" {
+			count := strings.Count(stats.ExitPointsJSON, "ip_address")
+			pct := 50 + count/3 // gradually increase from 50 toward ~90
+			if pct > 90 {
+				pct = 90
+			}
+			emitProgress("detecting_exits", fmt.Sprintf("Detecting exit points... %d found", count), pct)
+
+			// Log detection time once when first exit points appear
+			if !a.detectionLogged && !a.detectionStartTime.IsZero() {
+				elapsed := time.Since(a.detectionStartTime)
+				a.detectionLogged = true
+				log.Warn().
+					Int("exit_count", count).
+					Str("detection_time", fmt.Sprintf("%.1fs", elapsed.Seconds())).
+					Msg("EXIT DETECTION: first exit points detected")
+				runtime.EventsEmit(a.ctx, "detection:time", map[string]interface{}{
+					"elapsed_seconds": elapsed.Seconds(),
+					"exit_count":      count,
+				})
+			}
+		}
 	}
 	mgr.OnStatusChange = func(connected bool) {
 		runtime.EventsEmit(a.ctx, "status:change", connected)
+		if connected {
+			emitProgress("connected", "Connected!", 100)
+		} else {
+			emitProgress("reconnecting", "Reconnecting...", 50)
+		}
+	}
+	mgr.OnNetworkStatus = func(online bool) {
+		runtime.EventsEmit(a.ctx, "network:status", online)
 	}
 	mgr.OnNeedRestart = func() {
-		// Fallback: Restart() inside the manager failed, do a full StartRelay
+		// Skip restart if user explicitly stopped
+		if a.userStopped.Load() {
+			log.Info().Msg("Watchdog fallback: skipped (user stopped)")
+			return
+		}
+		// Throttle: at most one full restart every 2 minutes
+		if !a.lastFullRestart.IsZero() && time.Since(a.lastFullRestart) < 2*time.Minute {
+			log.Info().Msg("Watchdog fallback: throttled (last full restart < 2m ago)")
+			return
+		}
+		a.lastFullRestart = time.Now()
+		// Fallback: fast restarts failed repeatedly, do a full StartRelay with health checks
 		cfg := config.Get()
 		pid := cfg.GetString("partner_id")
 		if pid != "" {
-			log.Info().Msg("Watchdog fallback: full relay restart")
+			log.Info().Msg("Watchdog fallback: full relay restart with health checks")
 			if err := a.StartRelay(pid); err != nil {
 				log.Error().Err(err).Msg("Watchdog fallback: relay restart failed")
 			}
 		}
 	}
 
+	emitProgress("initializing", "Initializing SDK...", 30)
+
 	if err := mgr.Init(verbose); err != nil {
+		emitProgress("error", fmt.Sprintf("Init failed: %v", err), 0)
 		return fmt.Errorf("failed to init node: %w", err)
+	}
+
+	// Check cancellation after slow DLL init
+	if a.userStopped.Load() {
+		mgr.Close()
+		return fmt.Errorf("start cancelled")
 	}
 
 	if discoveryUrl != "" {
@@ -256,7 +406,7 @@ func (a *App) StartRelay(partnerId string) error {
 		}
 	}
 
-	// Add all alive proxies to the single client
+	// Add all alive proxies (will be batched into parallel clients on Start)
 	addedCount := 0
 	for _, ps := range allStatuses {
 		if !ps.Alive {
@@ -270,10 +420,30 @@ func (a *App) StartRelay(partnerId string) error {
 		}
 	}
 
+	emitProgress("connecting", fmt.Sprintf("Connecting with %d proxies...", addedCount), 40)
+
+	// Check cancellation before slow DLL start
+	if a.userStopped.Load() {
+		mgr.Close()
+		return fmt.Errorf("start cancelled")
+	}
+
 	if err := mgr.Start(partnerId); err != nil {
+		emitProgress("error", fmt.Sprintf("Start failed: %v", err), 0)
 		mgr.Close()
 		return fmt.Errorf("failed to start node: %w", err)
 	}
+
+	// Check cancellation after slow DLL start
+	if a.userStopped.Load() {
+		_ = mgr.Stop()
+		mgr.Close()
+		return fmt.Errorf("start cancelled")
+	}
+
+	emitProgress("detecting_exits", "Detecting exit points...", 50)
+	a.detectionStartTime = time.Now()
+	a.detectionLogged = false
 
 	// Atomic swap: stop old relay, install new one
 	a.relayMu.Lock()
@@ -287,7 +457,7 @@ func (a *App) StartRelay(partnerId string) error {
 		old.Close()
 	}
 
-	log.Info().Int("proxies_added", addedCount).Int("proxies_total", len(proxies)).Msg("Single SDK client started with all proxies")
+	log.Info().Int("proxies_added", addedCount).Int("proxies_total", len(proxies)).Msg("Parallel SDK clients started")
 
 	// Auto-enable launch_on_startup + auto_start on first Partner ID
 	oldPartnerId := cfg.GetString("partner_id")
@@ -311,16 +481,39 @@ func (a *App) StartRelay(partnerId string) error {
 	if firstPartner {
 		runtime.EventsEmit(a.ctx, "config:updated", a.GetConfig())
 	}
+
+	// Start dead proxy retry goroutine (cancel any previous one)
+	if a.retryCancel != nil {
+		a.retryCancel()
+	}
+	retryCtx, retryCancel := context.WithCancel(context.Background())
+	a.retryCancel = retryCancel
+	go a.retryDeadProxies(retryCtx)
+
 	return nil
 }
 
 func (a *App) StopRelay() error {
+	// Set userStopped BEFORE acquiring lock — blocks watchdog/auto-restart immediately
+	a.userStopped.Store(true)
+
+	// Cancel any in-progress StartRelay (health checks)
+	if a.startCancel != nil {
+		a.startCancel()
+	}
+	// Stop dead proxy retry goroutine
+	if a.retryCancel != nil {
+		a.retryCancel()
+		a.retryCancel = nil
+	}
+
+	// Emit stopped event BEFORE the lock so UI never freezes
+	runtime.EventsEmit(a.ctx, "relay:stopped", true)
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	a.stopRelay()
-
-	runtime.EventsEmit(a.ctx, "relay:stopped", true)
 	return nil
 }
 
@@ -379,6 +572,7 @@ func (a *App) GetConfig() map[string]interface{} {
 		"auto_start":        cfg.GetBool("auto_start"),
 		"launch_on_startup": cfg.GetBool("launch_on_startup"),
 		"log_level":         cfg.GetString("log_level"),
+		"api_url":           cfg.GetString("api_url"),
 	}
 }
 
@@ -390,6 +584,7 @@ var allowedConfigKeys = map[string]bool{
 	"auto_start":        true,
 	"launch_on_startup": true,
 	"log_level":         true,
+	"api_url":           true,
 }
 
 func (a *App) SetConfigValue(key, value string) error {
@@ -409,6 +604,118 @@ func (a *App) SetConfigValue(key, value string) error {
 func (a *App) GetConfigValue(key string) (string, error) {
 	cfg := config.Get()
 	return cfg.GetString(config.NormalizeKey(key)), nil
+}
+
+// mergeExitPoints merges SDK's current exit points with all historically seen IPs.
+// Returns JSON with online/offline flag so offline IPs are preserved in the web dashboard.
+func (a *App) mergeExitPoints(currentJSON string) string {
+	type rawEP struct {
+		Type      string `json:"type"`
+		Country   string `json:"country"`
+		IPAddress string `json:"ip_address"`
+	}
+	var current []rawEP
+	if currentJSON != "" && currentJSON != "[]" {
+		_ = json.Unmarshal([]byte(currentJSON), &current)
+	}
+
+	activeSet := make(map[string]bool, len(current))
+
+	a.exitPointsMu.Lock()
+	if a.seenExitPoints == nil {
+		a.seenExitPoints = make(map[string]seenEP)
+	}
+
+	now := time.Now().Unix()
+	for _, ep := range current {
+		if ep.IPAddress == "" {
+			continue
+		}
+		activeSet[ep.IPAddress] = true
+		a.seenExitPoints[ep.IPAddress] = seenEP{
+			Type:     ep.Type,
+			Country:  ep.Country,
+			LastSeen: now,
+		}
+	}
+
+	type syncEP struct {
+		Type      string `json:"type"`
+		Country   string `json:"country"`
+		IPAddress string `json:"ip_address"`
+		Online    bool   `json:"online"`
+	}
+	merged := make([]syncEP, 0, len(a.seenExitPoints))
+	for ip, ep := range a.seenExitPoints {
+		merged = append(merged, syncEP{
+			Type:      ep.Type,
+			Country:   ep.Country,
+			IPAddress: ip,
+			Online:    activeSet[ip],
+		})
+	}
+	// Save snapshot for persistence across restarts
+	data, _ := json.Marshal(a.seenExitPoints)
+	needSave := len(a.seenExitPoints) > 0
+	a.exitPointsMu.Unlock()
+
+	if needSave {
+		fp := filepath.Join(config.GetConfigDir(), "seen_exits.json")
+		if err := os.WriteFile(fp, data, 0644); err != nil {
+			log.Error().Err(err).Str("path", fp).Msg("failed to save seen_exits.json")
+		}
+	}
+
+	out, _ := json.Marshal(merged)
+	if len(out) == 0 {
+		return "[]"
+	}
+	return string(out)
+}
+
+func (a *App) loadSeenExitPoints() {
+	a.exitPointsMu.Lock()
+	defer a.exitPointsMu.Unlock()
+
+	fp := filepath.Join(config.GetConfigDir(), "seen_exits.json")
+	data, err := os.ReadFile(fp)
+	if err != nil {
+		a.seenExitPoints = make(map[string]seenEP)
+		return
+	}
+	m := make(map[string]seenEP)
+	if err := json.Unmarshal(data, &m); err != nil {
+		a.seenExitPoints = make(map[string]seenEP)
+		return
+	}
+	// Prune entries not seen in >7 days (from removed proxies)
+	cutoff := time.Now().Add(-7 * 24 * time.Hour).Unix()
+	for ip, ep := range m {
+		if ep.LastSeen > 0 && ep.LastSeen < cutoff {
+			delete(m, ip)
+		}
+	}
+	log.Info().Int("loaded", len(m)).Msg("loaded seen exit points from disk")
+	a.seenExitPoints = m
+}
+
+// extractProxyIP extracts the IP address from a proxy URL like "user:pass@IP:port" or "IP:port".
+func extractProxyIP(raw string) string {
+	raw = strings.TrimSpace(raw)
+	// Strip scheme if present
+	if idx := strings.Index(raw, "://"); idx >= 0 {
+		raw = raw[idx+3:]
+	}
+	// Strip user:pass@ prefix
+	if idx := strings.LastIndex(raw, "@"); idx >= 0 {
+		raw = raw[idx+1:]
+	}
+	// Now raw is "IP:port" — strip port
+	host := raw
+	if idx := strings.LastIndex(host, ":"); idx >= 0 {
+		host = host[:idx]
+	}
+	return strings.TrimSpace(host)
 }
 
 func (a *App) AddProxy(proxyUrl string) error {
@@ -445,22 +752,42 @@ func (a *App) RemoveProxy(proxyUrl string) error {
 		return err
 	}
 
-	// Clear proxy statuses
+	// Remove only the specific proxy status (keep others intact)
+	var relayURL string
 	a.proxyStatusMu.Lock()
-	a.proxyStatuses = nil
+	if a.proxyStatuses != nil {
+		newStatuses := make([]proxy.Status, 0, len(a.proxyStatuses))
+		for _, s := range a.proxyStatuses {
+			if s.URL == proxyUrl {
+				// Build the relay-format URL for hot-removal
+				relayURL = proxy.BuildProxyURL(s.URL, s.Protocol)
+			} else {
+				newStatuses = append(newStatuses, s)
+			}
+		}
+		a.proxyStatuses = newStatuses
+	}
 	a.proxyStatusMu.Unlock()
 
-	runtime.EventsEmit(a.ctx, "proxy:status", []proxy.Status{})
+	runtime.EventsEmit(a.ctx, "proxy:status", a.proxyStatuses)
 	runtime.EventsEmit(a.ctx, "proxies:updated", newProxies)
 
-	// Restart relay with updated proxy list (single client must be recreated)
-	partnerId := cfg.GetString("partner_id")
-	if partnerId != "" && a.isRelayRunning() {
-		go func() {
-			if err := a.StartRelay(partnerId); err != nil {
-				log.Error().Err(err).Msg("Failed to restart relay after proxy removal")
+	// Hot-remove proxy from running relay — only restarts the affected batch
+	if a.isRelayRunning() {
+		a.relayMu.RLock()
+		mgr := a.relayMgr
+		a.relayMu.RUnlock()
+		if mgr != nil {
+			if relayURL == "" {
+				// Fallback: try raw URL (stripScheme matching in manager handles format mismatch)
+				relayURL = proxyUrl
 			}
-		}()
+			go func() {
+				if err := mgr.RemoveProxy(relayURL); err != nil {
+					log.Error().Err(err).Msg("Failed to hot-remove proxy from relay")
+				}
+			}()
+		}
 	}
 	return nil
 }
@@ -654,8 +981,8 @@ func (a *App) IsWindowMaximised() bool {
 
 // CloseWindow handles the X button: hide to background, relay keeps running
 func (a *App) CloseWindow() {
-	// If relay not running, start it before hiding
-	if !a.isRelayRunning() {
+	// If relay not running and user didn't explicitly stop, start it before hiding
+	if !a.isRelayRunning() && !a.userStopped.Load() {
 		cfg := config.Get()
 		go func() {
 			if err := a.StartRelay(cfg.GetString("partner_id")); err != nil {
@@ -719,7 +1046,7 @@ func (a *App) centerAndResize50() {
 	runtime.WindowCenter(a.ctx)
 }
 
-// stopRelay stops and closes the single relay manager.
+// stopRelay stops and closes the relay manager (all parallel clients).
 func (a *App) stopRelay() {
 	a.relayMu.Lock()
 	defer a.relayMu.Unlock()
@@ -728,5 +1055,108 @@ func (a *App) stopRelay() {
 		_ = a.relayMgr.Stop()
 		a.relayMgr.Close()
 		a.relayMgr = nil
+	}
+}
+
+// retryDeadProxies runs every 60s, re-checks dead proxies, and hot-adds any that revive.
+func (a *App) retryDeadProxies(ctx context.Context) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if a.userStopped.Load() {
+				return
+			}
+			a.doRetryDeadProxies()
+		}
+	}
+}
+
+func (a *App) doRetryDeadProxies() {
+	// Collect dead proxies
+	a.proxyStatusMu.RLock()
+	var deadProxies []proxy.Status
+	for _, ps := range a.proxyStatuses {
+		if !ps.Alive && ps.Error != "" && ps.Error != "checking" {
+			deadProxies = append(deadProxies, ps)
+		}
+	}
+	a.proxyStatusMu.RUnlock()
+
+	if len(deadProxies) == 0 {
+		return
+	}
+
+	log.Info().Int("count", len(deadProxies)).Msg("Retrying dead proxies")
+
+	// Check dead proxies in parallel
+	results := make([]proxy.Status, len(deadProxies))
+	var wg sync.WaitGroup
+	for i, dp := range deadProxies {
+		wg.Add(1)
+		go func(idx int, ps proxy.Status) {
+			defer wg.Done()
+			results[idx] = proxy.CheckHealth(ps.URL)
+		}(i, dp)
+	}
+	wg.Wait()
+
+	// Find revived proxies and update statuses
+	var revived []proxy.Status
+	now := time.Now().Unix()
+
+	a.proxyStatusMu.Lock()
+	for i, r := range results {
+		if !r.Alive {
+			continue
+		}
+		r.Since = now
+		// Find and update in proxyStatuses by URL
+		for j, ps := range a.proxyStatuses {
+			if ps.URL == deadProxies[i].URL {
+				r.BytesSent = ps.BytesSent
+				r.BytesRecv = ps.BytesRecv
+				a.proxyStatuses[j] = r
+				break
+			}
+		}
+		revived = append(revived, r)
+		log.Info().Str("proxy", r.URL).Str("protocol", r.Protocol).Msg("Dead proxy revived")
+	}
+	statuses := make([]proxy.Status, len(a.proxyStatuses))
+	copy(statuses, a.proxyStatuses)
+	a.proxyStatusMu.Unlock()
+
+	if len(revived) == 0 {
+		log.Debug().Int("dead", len(deadProxies)).Msg("No dead proxies revived")
+		return
+	}
+
+	// Emit updated statuses to UI
+	runtime.EventsEmit(a.ctx, "proxy:status", statuses)
+
+	// Hot-add revived proxies to running relay (skip if user stopped)
+	if a.userStopped.Load() {
+		return
+	}
+
+	a.relayMu.RLock()
+	mgr := a.relayMgr
+	a.relayMu.RUnlock()
+
+	if mgr != nil {
+		proxyURLs := make([]string, 0, len(revived))
+		for _, r := range revived {
+			proxyURLs = append(proxyURLs, proxy.BuildProxyURL(r.URL, r.Protocol))
+		}
+		if err := mgr.HotAddProxies(proxyURLs); err != nil {
+			log.Error().Err(err).Int("count", len(proxyURLs)).Msg("Failed to hot-add revived proxies")
+		} else {
+			log.Info().Int("count", len(proxyURLs)).Msg("Revived proxies hot-added to relay")
+		}
 	}
 }
